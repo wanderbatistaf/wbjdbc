@@ -38,26 +38,33 @@ def install_dependencies():
 
         wheel_path = os.path.join(dependencies_dir, wheel_file)
 
-        if os.path.exists(wheel_path):
-            print(f"Instalando JPype1 de {wheel_path} para {system}.")
-            try:
-                subprocess.check_call(["pip", "install", wheel_path])
-            except subprocess.CalledProcessError as e:
-                print(f"Erro ao instalar JPype1 de {wheel_path}: {e}")
-                print("Tentando instalar JPype1 diretamente do PyPI como fallback...")
-                subprocess.check_call(["pip", "install", "JPype1"])
-        else:
-            print(
-                f"O arquivo {wheel_file} não foi encontrado no diretório {dependencies_dir}. Tentando instalar do PyPI...")
+        # Primeira tentativa: PyPI
+        try:
+            print("Tentando instalar JPype1 diretamente do PyPI...")
             subprocess.check_call(["pip", "install", "JPype1"])
+        except subprocess.CalledProcessError as e:
+            print(f"Erro ao instalar JPype1 do PyPI: {e}")
+
+            # Tentativa local se PyPI falhar
+            if os.path.exists(wheel_path):
+                print(f"Tentando instalar JPype1 localmente de {wheel_path} para {system}.")
+                try:
+                    subprocess.check_call(["pip", "install", wheel_path])
+                except subprocess.CalledProcessError as e:
+                    print(f"Erro ao instalar JPype1 localmente de {wheel_path}: {e}")
+                    raise RuntimeError("Falha na instalação do JPype1.")
+            else:
+                print(f"Arquivo {wheel_file} não encontrado no diretório {dependencies_dir}.")
+                raise RuntimeError("Falha na instalação do JPype1.")
     finally:
-        # Validar se a instalação foi bem-sucedida
+        # Garantir que JPype1 foi instalado
         try:
             import jpype
             print("JPype1 instalado com sucesso!")
         except ImportError:
-            print("Erro: Falha ao instalar JPype1, mesmo após tentativa do PyPI.")
-            raise RuntimeError("Falha na instalação do JPype1.")
+            print("Erro: JPype1 não pôde ser instalado.")
+            raise RuntimeError("Falha final na instalação do JPype1.")
+
 
 
 # Chama a função para instalar JPype1
@@ -65,7 +72,7 @@ install_dependencies()
 
 setup(
     name="wbjdbc",
-    version="1.0.4",
+    version="1.0.5",
     packages=find_packages(),
     include_package_data=True,
     package_data={
