@@ -1,3 +1,5 @@
+[![Publish Package to PyPI](https://github.com/wanderbatistaf/wbjdbc/actions/workflows/publish-package.yml/badge.svg?branch=main)](https://github.com/wanderbatistaf/wbjdbc/actions/workflows/publish-package.yml)
+
 <h1>wbjdbc</h1>
 
 <p>wbjdbc é uma biblioteca Python que simplifica a configuração e o uso do JDBC e da JVM, especialmente para conexões com bancos de dados <strong>Informix</strong> e <strong>MongoDB</strong>. Ela fornece uma abordagem integrada para gerenciar drivers JDBC, iniciar a JVM e configurar o ambiente necessário para o acesso ao banco de dados.</p>
