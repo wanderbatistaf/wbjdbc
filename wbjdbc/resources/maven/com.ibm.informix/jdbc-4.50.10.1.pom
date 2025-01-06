@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd" xmlns="http://maven.apache.org/POM/4.0.0"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.ibm.informix</groupId>
+  <artifactId>jdbc</artifactId>
+  <version>4.50.10.1</version>
+  <name>IBM Informix JDBC Driver</name>
+  <description>Informix® JDBC Driver is a native-protocol, pure-Java driver (Type 4) that supports the JDBC specification. You can use the JDBC driver for Java applications that access the Informix database server.</description>
+  <url>https://www.ibm.com/informix</url>
+  <licenses>
+    <license>
+      <name>IBM Informix JDBC Software License Agreement</name>
+      <url>http://www-03.ibm.com/software/sla/sladb.nsf/doclookup/CA4476C0AF8346EC852579290012D218?OpenDocument</url>
+    </license>
+  </licenses>
+  <developers>
+    <developer>
+      <id>anuragb</id>
+      <name>Anurag Benjwal</name>
+      <email>benjwal.anurag@hcl.com</email>
+    </developer>
+  </developers>
+  <scm>
+    <connection>scm:git:git@github.com/ibm-informix/InformixServer.git</connection>
+    <url>https://github.com/informix</url>
+  </scm>
+  <dependencies>
+    <dependency>
+      <groupId>org.mongodb</groupId>
+      <artifactId>bson</artifactId>
+      <version>3.8.0</version>
+    </dependency>
+  </dependencies>
+</project>

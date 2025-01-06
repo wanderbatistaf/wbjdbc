@@ -1,0 +1,4 @@
+wbjdbc/resources/server/jdk-17.0.2/lib/modules filter=lfs diff=lfs merge=lfs -text
+*.whl filter=lfs diff=lfs merge=lfs -text
+*.tar.gz filter=lfs diff=lfs merge=lfs -text
+*.zip filter=lfs diff=lfs merge=lfs -text

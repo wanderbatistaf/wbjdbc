@@ -1,0 +1,11 @@
+include README.md
+
+# Inclui o DLL da JVM
+include wbjdbc/resources/server/*
+
+# Inclui os arquivos JAR
+include wbjdbc/resources/maven/com.ibm.informix/*
+include wbjdbc/resources/maven/org.mongodb/*
+
+# Inclui os wheels para instalação offline
+include wbjdbc/wheels/*
