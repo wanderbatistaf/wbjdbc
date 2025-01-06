@@ -36,10 +36,24 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip setuptools wheel twine
-        if [ "$(uname)" == "Linux" ]; then
-          python -m pip install wbjdbc/resources/dependencies/jpype1-1.5.1-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
-        elif [ "$(uname)" == "Windows_NT" ]; then
-          python -m pip install wbjdbc/resources/dependencies/jpype1-1.5.1-cp312-cp312-win_amd64.whl
+        echo "Attempting to install JPype1 from PyPI..."
+        if ! python -m pip install JPype1; then
+          echo "PyPI installation failed. Falling back to local wheels..."
+          if [[ $RUNNER_OS == "Linux" ]]; then
+            echo "Installing JPype1 for Linux..."
+            python -m pip install wbjdbc/resources/dependencies/jpype1-1.5.1-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+          elif [[ $RUNNER_OS == "Windows" ]]; then
+            echo "Installing JPype1 for Windows..."
+            python -m pip install wbjdbc/resources/dependencies/jpype1-1.5.1-cp312-cp312-win_amd64.whl
+          elif [[ $RUNNER_OS == "macOS" ]]; then
+            echo "Installing JPype1 for macOS..."
+            python -m pip install wbjdbc/resources/dependencies/jpype1-1.5.1-cp312-cp312-macosx_10_9_universal2.whl
+          else
+            echo "Unsupported OS: $RUNNER_OS"
+            exit 1
+          fi
+        else
+          echo "JPype1 successfully installed from PyPI!"
         fi
 
     - name: Build package
