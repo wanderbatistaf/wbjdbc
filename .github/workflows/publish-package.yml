@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:  # Permite rodar manualmente pelo GitHub Actions ou CLI
 
 jobs:
   publish:
