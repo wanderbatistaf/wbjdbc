@@ -14,7 +14,8 @@ import sys
 def install_dependencies():
     try:
         import jpype
-        print("JPype1 já está instalado.")
+        # Debug
+        # print("JPype1 já está instalado.")
     except ImportError:
         import platform
         import sys
@@ -72,7 +73,7 @@ install_dependencies()
 
 setup(
     name="wbjdbc",
-    version="1.0.6",
+    version="1.1.0",
     packages=find_packages(),
     include_package_data=True,
     package_data={
@@ -83,7 +84,7 @@ setup(
             "resources/dependencies/*",
         ]
     },
-    install_requires=[],  # Não lista JPype1 aqui, pois ele é instalado manualmente
+    install_requires=[jaydebeapi],
     description="Library to simplify JDBC and JVM configuration for Informix and MongoDB",
     long_description=long_description,
     long_description_content_type="text/markdown",
