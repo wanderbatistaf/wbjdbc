@@ -1,70 +1,92 @@
-[![Publish Package to PyPI](https://github.com/wanderbatistaf/wbjdbc/actions/workflows/publish-package.yml/badge.svg?branch=main)](https://github.com/wanderbatistaf/wbjdbc/actions/workflows/publish-package.yml)
+[![Publish Package to PyPI](https://github.com/wanderbatistaf/wbjdbc/actions/workflows/publish-package.yml/badge.svg?branch=v1.1.1)](https://github.com/wanderbatistaf/wbjdbc/actions/workflows/publish-package.yml)
 
-<h1>wbjdbc</h1>
+# wbjdbc
 
-<p>wbjdbc é uma biblioteca Python que simplifica a configuração e o uso do JDBC e da JVM, especialmente para conexões com bancos de dados <strong>Informix</strong> e <strong>MongoDB</strong>. Ela fornece uma abordagem integrada para gerenciar drivers JDBC, iniciar a JVM e configurar o ambiente necessário para o acesso ao banco de dados.</p>
+**wbjdbc** é uma biblioteca Python que simplifica a configuração e o uso do **JDBC** e da **JVM**, especialmente para conexões com bancos de dados **Informix** e **MongoDB**. Com suporte interno para gerenciamento de drivers JDBC, **wbjdbc** permite inicializar a JVM automaticamente e configurar conexões de forma simplificada.
 
-<h3>Recursos</h3>
-<ul>
-    <li>Inicialização simplificada da JVM (<code>jvm.dll</code>).</li>
-    <li>Suporte interno para os drivers JDBC:
-        <ul>
-            <li><strong>Informix JDBC Driver</strong>: <code>jdbc-4.50.10.1.jar</code></li>
-            <li><strong>MongoDB BSON Driver</strong>: <code>bson-3.8.0.jar</code></li>
-        </ul>
-    </li>
-    <li>Precompilação de dependências para evitar erros de compatibilidade.</li>
-    <li>Pacote leve e fácil de instalar.</li>
-</ul>
+## 🚀 Recursos Principais
+- **Inicialização automática da JVM** com detecção de `JAVA_HOME`.
+- **Suporte interno para múltiplos drivers JDBC**:
+  - **Informix JDBC Driver** (`jdbc-4.50.10.1.jar`)
+  - **MongoDB BSON Driver** (`bson-3.8.0.jar`)
+- **Gerenciamento interno de dependências**, incluindo suporte para **JPype1**.
+- **Configuração simplificada** para conexão com bancos de dados via JDBC.
+- **Compatível com Python 3.8+**.
 
-<h3>Requisitos</h3>
-<ul>
-    <li>Python 3.8 ou superior.</li>
-    <li>Java JDK compatível com o seu sistema operacional.</li>
-</ul>
+## 📌 Requisitos
+- **Python** `3.8` ou superior.
+- **Java JDK** compatível com o seu sistema operacional.
 
-<h3>Instalação</h3>
-<p>Para instalar a biblioteca:</p>
-<pre><code>pip install wbjdbc</code></pre>
+## 📺 Instalação
+Para instalar a biblioteca via **PyPI**, execute:
 
-<h2>Uso</h2>
+```sh
+pip install wbjdbc
+```
 
-<h3>Inicializando a JVM</h3>
-<p>Basta importar a biblioteca e chamar o método <code>start_jvm()</code>:</p>
-<pre><code>from wbjdbc import start_jvm
+## 🛠️ Uso
 
-start_jvm()
-</code></pre>
+### 🔹 Inicializando a JVM
+A JVM pode ser inicializada automaticamente pelo `wbjdbc`, mas você também pode inicializá-la manualmente:
 
-<h3>Exemplo de Conexão JDBC</h3>
-<p>Aqui está um exemplo de como usar o <strong>wbjdbc</strong> para se conectar a um banco de dados Informix:</p>
-<pre><code>from wbjdbc import start_jvm
-import jaydebeapi
+```python
+from wbjdbc import start_jvm
 
 start_jvm()
+```
 
-# Configuração da conexão JDBC
-jdbc_url = "jdbc:informix-sqli://<host>:<port>/<database>:INFORMIXSERVER=<server>"
-user = "<usuario>"
-password = "<senha>"
+Isso garantirá que a JVM esteja disponível antes de realizar conexões via JDBC.
 
-# Conectando ao banco de dados
-conn = jaydebeapi.connect("com.informix.jdbc.IfxDriver", jdbc_url, [user, password])
+### 🔹 Conectando-se ao Informix
+Aqui está um exemplo de como usar o **wbjdbc** para se conectar a um banco de dados **Informix**:
+
+```python
+from wbjdbc import connect_to_db
+
+# Parâmetros de conexão
+conn = connect_to_db(
+    db_type="informix-sqli",
+    host="meu-servidor",
+    database="minha_base",
+    user="meu_usuario",
+    password="minha_senha",
+    port=1526,
+    server="meu_informix_server"
+)
+
+# Criando cursor e executando uma consulta
 cursor = conn.cursor()
-
-# Executando uma consulta
 cursor.execute("SELECT * FROM minha_tabela")
 resultados = cursor.fetchall()
 
+# Exibindo resultados
 for linha in resultados:
     print(linha)
 
+# Fechando conexão
 cursor.close()
 conn.close()
-</code></pre>
+```
 
-<h3>Contribuição</h3>
-<p>Se você deseja contribuir para o projeto, envie um pull request no <a href="https://github.com/wanderbatistaf/wbjdbc">repositório do GitHub</a>.</p>
+### 🔹 Configuração Avançada
 
-<h3>Licença</h3>
-<p>Este projeto é licenciado sob a licença MIT. Consulte o arquivo <code>LICENSE</code> para mais informações.</p>
+#### 📌 Definir um caminho específico para o Java
+Caso o `JAVA_HOME` não esteja corretamente configurado, você pode forçar um caminho específico para o Java:
+
+```python
+start_jvm(java_home="/caminho/para/o/java")
+```
+
+#### 📌 Adicionar JARs adicionais
+Se precisar de drivers JDBC extras, basta adicionar os arquivos `.jar` na inicialização:
+
+```python
+start_jvm(extra_jars=["/caminho/para/outro-driver.jar"])
+```
+
+## 🤝 Contribuição
+Se deseja contribuir com melhorias para o projeto, envie um **pull request** no [repositório oficial](https://github.com/wanderbatistaf/wbjdbc).
+
+## 📜 Licença
+Este projeto é licenciado sob a **Licença MIT**. Consulte o arquivo [`LICENSE`](https://github.com/wanderbatistaf/wbjdbc/blob/main/LICENSE) para mais informações.
+
