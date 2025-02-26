@@ -4,7 +4,7 @@
 
 **wbjdbc** é uma biblioteca Python que simplifica a configuração e o uso do **JDBC** e da **JVM**, especialmente para conexões com bancos de dados **Informix** e **MongoDB**. Com suporte interno para gerenciamento de drivers JDBC, **wbjdbc** permite inicializar a JVM automaticamente e configurar conexões de forma simplificada.
 
-## 🚀 Recursos Principais
+## Recursos Principais
 - **Inicialização automática da JVM** com detecção de `JAVA_HOME`.
 - **Suporte interno para múltiplos drivers JDBC**:
   - **Informix JDBC Driver** (`jdbc-4.50.10.1.jar`)
@@ -13,20 +13,20 @@
 - **Configuração simplificada** para conexão com bancos de dados via JDBC.
 - **Compatível com Python 3.8+**.
 
-## 📌 Requisitos
+## Requisitos
 - **Python** `3.8` ou superior.
 - **Java JDK** compatível com o seu sistema operacional.
 
-## 📺 Instalação
+##Instalação
 Para instalar a biblioteca via **PyPI**, execute:
 
 ```sh
 pip install wbjdbc
 ```
 
-## 🛠️ Uso
+## Uso
 
-### 🔹 Inicializando a JVM
+### Inicializando a JVM
 A JVM pode ser inicializada automaticamente pelo `wbjdbc`, mas você também pode inicializá-la manualmente:
 
 ```python
@@ -37,7 +37,7 @@ start_jvm()
 
 Isso garantirá que a JVM esteja disponível antes de realizar conexões via JDBC.
 
-### 🔹 Conectando-se ao Informix
+### Conectando-se ao Informix
 Aqui está um exemplo de como usar o **wbjdbc** para se conectar a um banco de dados **Informix**:
 
 ```python
@@ -68,16 +68,16 @@ cursor.close()
 conn.close()
 ```
 
-### 🔹 Configuração Avançada
+### Configuração Avançada
 
-#### 📌 Definir um caminho específico para o Java
+#### Definir um caminho específico para o Java
 Caso o `JAVA_HOME` não esteja corretamente configurado, você pode forçar um caminho específico para o Java:
 
 ```python
 start_jvm(java_home="/caminho/para/o/java")
 ```
 
-#### 📌 Adicionar JARs adicionais
+#### Adicionar JARs adicionais
 Se precisar de drivers JDBC extras, basta adicionar os arquivos `.jar` na inicialização:
 
 ```python
@@ -87,6 +87,6 @@ start_jvm(extra_jars=["/caminho/para/outro-driver.jar"])
 ## 🤝 Contribuição
 Se deseja contribuir com melhorias para o projeto, envie um **pull request** no [repositório oficial](https://github.com/wanderbatistaf/wbjdbc).
 
-## 📜 Licença
+## Licença
 Este projeto é licenciado sob a **Licença MIT**. Consulte o arquivo [`LICENSE`](https://github.com/wanderbatistaf/wbjdbc/blob/main/LICENSE) para mais informações.
 
