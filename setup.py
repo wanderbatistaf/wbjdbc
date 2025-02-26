@@ -84,7 +84,7 @@ setup(
             "resources/dependencies/*",
         ]
     },
-    install_requires=[jaydebeapi],
+    install_requires=["jaydebeapi"],
     description="Library to simplify JDBC and JVM configuration for Informix and MongoDB",
     long_description=long_description,
     long_description_content_type="text/markdown",
