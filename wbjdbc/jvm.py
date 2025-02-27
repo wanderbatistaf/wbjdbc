@@ -1,160 +1,164 @@
 import os
 import sys
 import subprocess
+import time
 import jpype
 from pkg_resources import resource_filename
 
 
 class JVMError(Exception):
-    """Classe personalizada para erros de JVM."""
+    """Custom class for JVM-related errors."""
     pass
 
 
 def ensure_jpype_installed():
-    """Garante que JPype1 esteja instalado corretamente."""
+    """Ensures that JPype1 is correctly installed."""
     try:
         import jpype
         # Debug
-        # print("✅ JPype1 já instalado.")
+        # print("✅ JPype1 is already installed.")
     except ImportError:
         wheels_dir = resource_filename("wbjdbc", "wheels")
 
         if not os.path.isdir(wheels_dir):
-            raise JVMError(f"❌ Diretório de wheels não encontrado: {wheels_dir}")
+            raise JVMError(f"❌ Wheels directory not found: {wheels_dir}")
 
         wheel_file = next((f for f in os.listdir(wheels_dir) if "JPype1" in f and f.endswith(".whl")), None)
         if not wheel_file:
-            raise JVMError("❌ Wheel do JPype1 não encontrado no diretório de wheels.")
+            raise JVMError("❌ JPype1 wheel not found in the wheels directory.")
 
         try:
             subprocess.check_call([sys.executable, "-m", "pip", "install", os.path.join(wheels_dir, wheel_file)])
-            print("✅ JPype1 instalado com sucesso.")
+            print("✅ JPype1 successfully installed.")
         except subprocess.CalledProcessError as e:
-            raise JVMError(f"❌ Falha ao instalar JPype1: {e}")
+            raise JVMError(f"❌ Failed to install JPype1: {e}")
 
 
-# Garante que JPype1 está instalado antes de prosseguir
+# Ensures JPype1 is installed before proceeding
 ensure_jpype_installed()
-
-class JVMError(Exception):
-    """Classe personalizada para erros de JVM."""
-    pass
 
 
 def find_java_executable():
-    """Encontra o caminho do executável do Java (`java.exe` ou `java`)."""
+    """Finds the path of the Java executable (`java.exe` or `java`)."""
     try:
         java_path = subprocess.check_output("where java", shell=True).decode().strip().split("\n")[0]
-        print(f"\n🔍 **Java Detectado:** {java_path}\n")
+        print(f"\n🔍 **Java Detected:** {java_path}\n")
         return java_path
     except subprocess.CalledProcessError:
-        raise JVMError("❌ Não foi possível localizar o executável Java (java.exe). Verifique se está instalado e no PATH.")
+        raise JVMError("❌ Could not locate Java executable (java.exe). Ensure it is installed and in the PATH.")
 
 
 def detect_java_home():
-    """Detecta automaticamente o JAVA_HOME correto."""
+    """Automatically detects the correct JAVA_HOME."""
     java_home = os.environ.get("JAVA_HOME")
 
     if java_home:
         java_exe = os.path.join(java_home, "bin", "java.exe") if os.name == "nt" else os.path.join(java_home, "bin", "java")
         if os.path.isfile(java_exe):
-            return java_home  # Retorna se JAVA_HOME for válido
+            return java_home  # Returns if JAVA_HOME is valid
 
     try:
         java_path = subprocess.check_output("where java", shell=True).decode().strip().split("\n")[0]
-        java_home = os.path.dirname(os.path.dirname(java_path))  # Volta dois diretórios para encontrar o JDK
+        java_home = os.path.dirname(os.path.dirname(java_path))  # Moves two directories up to find JDK
         if os.path.isdir(java_home):
             return java_home
     except Exception:
         pass
 
-    return None  # Falha ao detectar Java
+    return None  # Failed to detect Java
 
 
-def start_jvm(jars=None, java_home=None):
+def start_jvm(jars=None, java_home=None, debug=0):
     """
-    Inicia a JVM garantindo que o Java correto seja usado.
+    Starts the JVM, ensuring the correct Java version is used.
 
-    :param jars: Lista de arquivos JAR adicionais.
-    :param java_home: Caminho alternativo para JAVA_HOME (opcional).
+    :param jars: List of additional JAR files.
+    :param java_home: Alternative JAVA_HOME path (optional).
+    :param debug: Enables additional logs.
     """
     try:
-        # Debug
-        # print("\n🔹 VALIDANDO CAMINHOS NECESSÁRIOS PARA JVM...\n")
+        if debug == 1:
+            # Debug
+            print("\n🔹 VALIDATING REQUIRED JVM PATHS...\n")
 
-        # Detecta JAVA_HOME automaticamente se não for fornecido
+        # Automatically detects JAVA_HOME if not provided
         java_home = java_home or detect_java_home()
         if not java_home:
-            raise JVMError("❌ Nenhuma instalação válida do Java foi encontrada.")
+            raise JVMError("❌ No valid Java installation found.")
 
-        print(f"🟢 JAVA_HOME detectado: {java_home}\n")
+        print(f"🟢 JAVA_HOME detected: {java_home}\n")
 
-        # Define o caminho da JVM
+        # Defines the JVM path
         jvm_path = os.path.join(java_home, "bin", "server", "jvm.dll") if os.name == "nt" else os.path.join(java_home,
                                                                                                             "lib",
                                                                                                             "server",
                                                                                                             "libjvm.so")
 
         if not os.path.isfile(jvm_path):
-            raise JVMError(f"❌ JVM não encontrada: {jvm_path}")
+            raise JVMError(f"❌ JVM not found: {jvm_path}")
 
-        #Debug
-        # print(f"🟢 JVM Path: {jvm_path}  -->  ✅ Encontrado\n")
+        if debug == 1:
+            # Debug
+            print(f"🟢 JVM Path: {jvm_path}  -->  ✅ Found\n")
 
-        # Configuração dos JARs
+        # JAR configuration
         if jars is None:
             jars = []
 
-        # Adiciona o JAR do Informix
+        # Adds the Informix JAR
         informix_jar = resource_filename("wbjdbc", "resources/maven/com.ibm.informix/jdbc-4.50.10.1.jar")
         jars.insert(0, informix_jar)
 
-        # Adiciona o JAR do BSON (MongoDB)
+        # Adds the BSON JAR (MongoDB)
         bson_jar = resource_filename("wbjdbc", "resources/maven/org.mongodb/bson-3.8.0.jar")
         if os.path.isfile(bson_jar):
             jars.append(bson_jar)
         else:
-            raise JVMError(f"❌ Arquivo BSON JAR não encontrado: {bson_jar}")
+            raise JVMError(f"❌ BSON JAR file not found: {bson_jar}")
 
-        # Verifica se os JARs existem
+        # Verifies that all JARs exist
         for jar in jars:
             if not os.path.isfile(jar):
-                raise JVMError(f"❌ Arquivo JAR não encontrado: {jar}")
+                raise JVMError(f"❌ JAR file not found: {jar}")
 
-        classpath = os.pathsep.join(jars)  # `;` no Windows, `:` no Linux/Mac
+        classpath = os.pathsep.join(jars)  # `;` on Windows, `:` on Linux/Mac
 
-        # Debug
-        # print("🔹 VALIDANDO JARS NECESSÁRIOS...\n")
-        for jar in jars:
-            print(f"🟢 JAR: {jar}  -->  ✅ Encontrado")
+        if debug == 1:
+            # Debug
+            print("🔹 VALIDATING REQUIRED JARS...\n")
+            for jar in jars:
+                print(f"🟢 JAR: {jar}  -->  ✅ Found")
 
-        print(f"\n🔹 Classpath Final: {classpath}\n")
+            print(f"\n🔹 Final Classpath: {classpath}\n")
 
-        # Inicializa a JVM apenas se ainda não estiver rodando
+        # Starts the JVM only if it's not already running
         if not jpype.isJVMStarted():
-            print("\n🔄 Tentando iniciar a JVM...\n")
+            print("\n🔄 Attempting to start JVM...\n")
             jpype.startJVM(jvm_path, f"-Djava.class.path={classpath}")
 
-            # Verifica se o DriverManager do JDBC está carregado corretamente
+            time.sleep(1)
+
+            # Verifies if the JDBC DriverManager class is correctly loaded
             try:
                 jpype.java.lang.Class.forName("java.sql.DriverManager")
-                # Debug
-                # print("✅ Classe java.sql.DriverManager carregada com sucesso!")
+                if debug == 1:
+                    # Debug
+                    print("✅ Class java.sql.DriverManager successfully loaded!")
+                else:
+                    return
             except jpype.JClassNotFoundException:
-                raise JVMError("❌ Erro: Não foi possível carregar a classe java.sql.DriverManager!")
+                raise JVMError("❌ Error: Could not load the java.sql.DriverManager class!")
 
-            print("✅ JVM inicializada com sucesso!")
+            print("✅ JVM successfully started!")
         else:
-            print("✅ JVM já está inicializada.")
+            print("✅ JVM is already running.")
 
     except JVMError as e:
-        print(f"❌ Erro na inicialização da JVM: {e}")
+        print(f"❌ JVM Initialization Error: {e}")
         raise
     except jpype.JVMNotSupportedException as e:
-        print(f"❌ A JVM não é suportada: {e}")
+        print(f"❌ The JVM is not supported: {e}")
         raise
     except Exception as e:
-        print(f"❌ Erro inesperado ao inicializar a JVM: {e}")
+        print(f"❌ Unexpected error while starting the JVM: {e}")
         raise
-
-

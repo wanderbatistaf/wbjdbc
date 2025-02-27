@@ -2,7 +2,7 @@ import os
 from .jvm import start_jvm
 import jaydebeapi
 
-# Configurações padrão para drivers
+# Default configuration for database drivers
 DEFAULT_DRIVERS = {
     "informix-sqli": {
         "driver_class": "com.informix.jdbc.IfxDriver",
@@ -21,66 +21,113 @@ DEFAULT_DRIVERS = {
     },
 }
 
-def connect_to_db(db_type, host, database, user, password, port=None, server=None, extra_jars=None, java_home=None):
-    """
-    Conecta ao banco de dados via JDBC sem exigir detalhes complexos do usuário.
 
-    :param db_type: Tipo do banco de dados. As opções disponíveis são:
-        - 1 :"informix-sqli" (para Informix)
-        - 2 :"mysql" (para MySQL)
-        - 3 :"postgresql" (para PostgreSQL)
-    :param host: Endereço do servidor do banco de dados.
-    :param database: Nome do banco de dados.
-    :param user: Nome de usuário.
-    :param password: Senha.
-    :param port: Porta opcional (usa padrão se não for fornecida).
-    :param server: Server do banco de dados informix.
-    :param extra_jars: Lista de caminhos para JARs adicionais, se necessário.
-    :param java_home: Caminho alternativo para JAVA_HOME (opcional).
-    :return: Conexão ativa via jaydebeapi.
+class JDBCConnection:
+    """Wrapper class for the JDBC connection, including a cursor with headers."""
+
+    def __init__(self, connection):
+        self.connection = connection
+
+    def cursor(self):
+        """Returns a customized JDBC cursor."""
+        return JDBCCursor(self.connection.cursor())
+
+    def close(self):
+        """Closes the connection."""
+        self.connection.close()
+
+
+class JDBCCursor:
+    """Wrapper class for the JDBC cursor, adding support for fetchdh()."""
+
+    def __init__(self, cursor):
+        self.cursor = cursor
+
+    def execute(self, query, params=None):
+        """Executes a query with or without parameters."""
+        if params:
+            self.cursor.execute(query, params)
+        else:
+            self.cursor.execute(query)
+
+    def fetchall(self):
+        """Returns the data as a list of tuples."""
+        return self.cursor.fetchall()
+
+    def fetchdh(self):
+        """Returns the results as a list of dictionaries with headers."""
+        column_names = [desc[0] for desc in self.cursor.description]
+        rows = self.cursor.fetchall()
+        return [dict(zip(column_names, row)) for row in rows]
+
+    def close(self):
+        """Closes the cursor."""
+        self.cursor.close()
+
+
+def connect_to_db(db_type, host, database, user, password, port=None, server=None, extra_jars=None, java_home=None,
+                  debug=0):
+    """
+    Connects to a database using JDBC without requiring complex configurations.
+
+    :param db_type: Database type. Available options:
+        - 1: "informix-sqli" (Informix)
+        - 2: "mysql" (MySQL)
+        - 3: "postgresql" (PostgreSQL)
+    :param host: Database server address.
+    :param database: Database name.
+    :param user: Username.
+    :param password: Password.
+    :param port: Optional port (defaults to standard).
+    :param server: Informix database server.
+    :param extra_jars: List of additional JAR file paths, if necessary.
+    :param java_home: Alternative JAVA_HOME path (optional).
+    :param debug: Enables debug logs in the console.
+    :return: Active connection via jaydebeapi or None if it fails.
     """
 
-    if db_type == 1:
-        db_type = 'informix-sqli'
-    elif db_type == 2:
-        db_type = 'mysql'
-    elif db_type == 3:
-        db_type = 'postgresql'
-    else:
-        db_type = db_type
+    # Maps integer values to strings
+    db_type_mapping = {1: "informix-sqli", 2: "mysql", 3: "postgresql"}
+    db_type = db_type_mapping.get(db_type, db_type)
 
     if db_type not in DEFAULT_DRIVERS:
-        raise ValueError(f"❌ Banco de dados '{db_type}' não suportado. Opções disponíveis: {list(DEFAULT_DRIVERS.keys())}")
+        print(f"❌ Database '{db_type}' not supported.")
+        return None
 
     driver_config = DEFAULT_DRIVERS[db_type]
     driver_class = driver_config["driver_class"]
     jar_path = driver_config["jar"]
     port = port or driver_config["default_port"]
 
-    # Debug
-    # print(f"🔍 DB Type: {db_type}, Host: {host}, Database: {database}, Porta: {port}")
+    if debug:
+        print(f"\n🔍 DB Type: {db_type}, Host: {host}, Database: {database}, Port: {port}")
 
-    # 🔹 Corrigindo a URL JDBC para Informix
-    if db_type == "informix":
+    # 🔹 Adjusting the JDBC URL for Informix
+    if db_type == "informix-sqli":
+        if not server:
+            print("❌ For Informix-SQLI, the `server` parameter is required.")
+            return None
         jdbc_url = f"jdbc:informix-sqli://{host}:{port}/{database}:INFORMIXSERVER={server}"
     else:
         jdbc_url = f"jdbc:{db_type}://{host}:{port}/{database}"
 
-    # Debug
-    # print(f"🔹 URL JDBC Gerada: {jdbc_url}")
+    if debug:
+        print(f"🔹 Generated JDBC URL: {jdbc_url}")
 
-    # Debug
-    # print("\n🟢 Chegou até aqui antes de iniciar a JVM")
-
-    # Inicia a JVM com os JARs necessários
+    # 🔹 Initializing the JVM
     jars = [jar_path] + (extra_jars if extra_jars else [])
-    start_jvm(jars, java_home=java_home)
 
-    # Conecta ao banco usando JayDeBeAPI
+    if debug:
+        print("\n🟢 Starting the JVM...\n")
+
+    start_jvm(jars, java_home=java_home, debug=debug)
+
+    # 🔹 Attempting to connect to the database
     try:
         conn = jaydebeapi.connect(driver_class, jdbc_url, [user, password], jars)
-        print(f"✅ Conexão com {db_type.upper()} estabelecida com sucesso!")
-        return conn
+        if debug:
+            print(f"✅ Successfully connected to {db_type.upper()}!")
+        return JDBCConnection(conn)  # <-- CORRECT: Returns a JDBCConnection
     except jaydebeapi.DatabaseError as e:
-        print(f"❌ Erro ao conectar ao banco de dados: {e}")
-        raise
+        print(f"❌ Error connecting to the database: {e}")
+        return None
