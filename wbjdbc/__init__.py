@@ -22,6 +22,18 @@ DEFAULT_DRIVERS = {
 }
 
 
+class ConnectionError(Exception):
+    """Connection erro, friendly."""
+    pass
+
+def is_host_reachable(host):
+    try:
+        socket.gethostbyname(host)
+        return True
+    except socket.error:
+        return False
+
+
 class JDBCConnection:
     """Wrapper class for the JDBC connection, including a cursor with headers."""
 
@@ -35,6 +47,17 @@ class JDBCConnection:
     def close(self):
         """Closes the connection."""
         self.connection.close()
+
+    def execute_query(self, query):
+        """
+        Executes a query and returns the results as a list of dictionaries.
+        """
+        cursor = self.cursor()
+        cursor.execute(query)
+        results = cursor.fetchdh()
+        cursor.close()
+        return results
+
 
 
 class JDBCCursor:
