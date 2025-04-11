@@ -67,13 +67,9 @@ def install_dependencies():
             raise RuntimeError("Falha final na instalação do JPype1.")
 
 
-
-# Chama a função para instalar JPype1
-install_dependencies()
-
 setup(
     name="wbjdbc",
-    version="1.1.3",
+    version="1.1.4",
     packages=find_packages(),
     include_package_data=True,
     package_data={
@@ -84,7 +80,10 @@ setup(
             "resources/dependencies/*",
         ]
     },
-    install_requires=["jaydebeapi"],
+    install_requires=[
+        "jaydebeapi",
+        "JPype1>=1.3.0"
+    ],
     description="Library to simplify JDBC and JVM configuration for Informix and MongoDB",
     long_description=long_description,
     long_description_content_type="text/markdown",
@@ -92,3 +91,12 @@ setup(
     author_email="wanderfreitasb@gmail.com",
     url="https://github.com/wanderbatistaf/wbjdbc",
 )
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--install-jpype", action="store_true")
+    args, _ = parser.parse_known_args()
+
+    if args.install_jpype:
+        install_dependencies()

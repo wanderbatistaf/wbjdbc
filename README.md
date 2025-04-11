@@ -1,5 +1,5 @@
 [![PyPI](https://img.shields.io/pypi/v/wbjdbc)](https://pypi.org/project/wbjdbc/) [![PyPI - Downloads](https://img.shields.io/pypi/dm/wbjdbc)](https://pypi.org/project/wbjdbc/) [![Build Status](https://github.com/wanderbatistaf/wbjdbc/actions/workflows/publish-package.yml/badge.svg)](https://github.com/wanderbatistaf/wbjdbc/actions) ![License: MIT](https://img.shields.io/github/license/wanderbatistaf/wbjdbc) [![Último Commit](https://img.shields.io/github/last-commit/wanderbatistaf/wbjdbc)](https://github.com/wanderbatistaf/wbjdbc) [![GitHub issues](https://img.shields.io/github/issues/wanderbatistaf/wbjdbc)](https://github.com/wanderbatistaf/wbjdbc/issues) [![GitHub forks](https://img.shields.io/github/forks/wanderbatistaf/wbjdbc?style=social)](https://github.com/wanderbatistaf/wbjdbc) [![GitHub stars](https://img.shields.io/github/stars/wanderbatistaf/wbjdbc?style=social)](https://github.com/wanderbatistaf/wbjdbc) 
-# wbjdbc (v1.1.3)
+# wbjdbc (v1.1.4)
 
 ### 🌍 **Português** | 🇺🇸 **English**
 
@@ -16,6 +16,7 @@
   - **MongoDB BSON Driver** (`bson-3.8.0.jar`)
 - **Gerenciamento interno de dependências**, incluindo suporte para **JPype1**.
 - **Modo Debug** para facilitar troubleshooting.
+- **Método `execute_query()`** retornando lista de dicionários.
 - **Compatível com Python 3.8+**.
 
 ---
@@ -75,6 +76,33 @@ for linha in resultados:
 cursor.close()
 conn.close()
 ```
+
+---
+
+### ⚙️ **Consulta Simplificada com `execute_query()` (para uso com `wborm`)**
+
+A nova versão do `wbjdbc` oferece um método auxiliar para retornar uma lista de dicionários com nomes de colunas — ideal para integração com `wborm`:
+
+```python
+from wbjdbc import connect_to_db
+
+conn = connect_to_db(
+    db_type="informix-sqli",
+    host="meu-servidor",
+    database="minha_base",
+    user="meu_usuario",
+    password="minha_senha",
+    port=1526,
+    server="meu_informix_server"
+)
+
+resultados = conn.execute_query("SELECT * FROM minha_tabela")
+
+for row in resultados:
+    print(row)  # {'id': 1, 'nome': 'Produto A', 'preco': 25.99}
+```
+
+> 🔁 O `execute_query()` retorna uma lista de dicionários com os nomes das colunas como chaves.
 
 ---
 
@@ -144,7 +172,7 @@ Este projeto é licenciado sob a **Licença MIT**. Consulte o arquivo [`LICENSE`
 
 ---
 
-# 📌 **wbjdbc (v1.1.3) - English Version**
+# 📌 **wbjdbc (v1.1.4) - English Version**
 
 ## 📌 What is `wbjdbc`?
 
@@ -156,6 +184,7 @@ Este projeto é licenciado sob a **Licença MIT**. Consulte o arquivo [`LICENSE`
   - **Informix JDBC Driver** (`jdbc-4.50.10.1.jar`)
   - **MongoDB BSON Driver** (`bson-3.8.0.jar`)
 - **Internal dependency management**, including **JPype1** support.
+- **New: `execute_query()` for dictionary-based results**
 - **Debug Mode** to help with troubleshooting.
 - **Compatible with Python 3.8+**.
 
@@ -205,6 +234,22 @@ cursor.close()
 conn.close()
 ```
 
+---
+
+### ⚙️ **Simplified Query with `execute_query()`**
+
+New in version `1.1.4`, you can run a query and receive the output as a list of dictionaries — perfect for tools like `wborm`:
+
+```python
+results = conn.execute_query("SELECT * FROM my_table")
+for row in results:
+    print(row)  # {'id': 1, 'name': 'Product A', 'price': 25.99}
+```
+
+> 🔁 The `execute_query()` method returns rows with named fields as keys.
+
+---
+
 ### 📋 **Example Output**:
 
 ```sh
@@ -213,9 +258,44 @@ conn.close()
 (3, 'Product C', 32.75)
 ```
 
-For more details, check the official [GitHub repository](https://github.com/wanderbatistaf/wbjdbc).
+---
+
+## 🛠️ **Advanced Configuration**
+
+### 🔍 **Set a specific Java path**
+
+```python
+start_jvm(java_home="/path/to/java")
+```
+
+### 📦 **Add custom JDBC JARs**
+
+```python
+start_jvm(extra_jars=["/path/to/driver.jar"])
+```
 
 ---
 
+## 🐛 **Debug Mode**
+
+```python
+start_jvm(debug=1)
+```
+
+Or during connection:
+
+```python
+connect_to_db(..., debug=1)
+```
+
+---
+
+## 🤝 **Contribute**
+Pull requests are welcome via the [official GitHub repository](https://github.com/wanderbatistaf/wbjdbc).
+
+---
+
+## 📜 **License**
+This project is licensed under the **MIT License**. See the [`LICENSE`](https://github.com/wanderbatistaf/wbjdbc/blob/main/LICENSE) file for details.
 ## **Made by a Brazilian Developer 🇧🇷**
 
