@@ -65,6 +65,7 @@ class JDBCCursor:
 
     def __init__(self, cursor):
         self.cursor = cursor
+        self._description = None
 
     def execute(self, query, params=None):
         """Executes a query with or without parameters."""
@@ -72,6 +73,16 @@ class JDBCCursor:
             self.cursor.execute(query, params)
         else:
             self.cursor.execute(query)
+        self._description = self.cursor.description
+
+    @property
+    def description(self):
+        """Description of columns after executing the command (tuple of (name, ...))"""
+        return self._description
+
+    def fetchone(self):
+        """Returns a row as a tuple, or None if there are no more."""
+        return self.cursor.fetchone()
 
     def fetchall(self):
         """Returns the data as a list of tuples."""

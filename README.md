@@ -1,5 +1,5 @@
 [![PyPI](https://img.shields.io/pypi/v/wbjdbc)](https://pypi.org/project/wbjdbc/) [![PyPI - Downloads](https://img.shields.io/pypi/dm/wbjdbc)](https://pypi.org/project/wbjdbc/) [![Build Status](https://github.com/wanderbatistaf/wbjdbc/actions/workflows/publish-package.yml/badge.svg)](https://github.com/wanderbatistaf/wbjdbc/actions) ![License: MIT](https://img.shields.io/github/license/wanderbatistaf/wbjdbc) [![Último Commit](https://img.shields.io/github/last-commit/wanderbatistaf/wbjdbc)](https://github.com/wanderbatistaf/wbjdbc) [![GitHub issues](https://img.shields.io/github/issues/wanderbatistaf/wbjdbc)](https://github.com/wanderbatistaf/wbjdbc/issues) [![GitHub forks](https://img.shields.io/github/forks/wanderbatistaf/wbjdbc?style=social)](https://github.com/wanderbatistaf/wbjdbc) [![GitHub stars](https://img.shields.io/github/stars/wanderbatistaf/wbjdbc?style=social)](https://github.com/wanderbatistaf/wbjdbc) 
-# wbjdbc (v1.1.4)
+# wbjdbc (v1.2.0)
 
 ### 🌍 **Português** | 🇺🇸 **English**
 
@@ -76,7 +76,26 @@ for linha in resultados:
 cursor.close()
 conn.close()
 ```
+---
+### 🧩 Métodos adicionais do cursor
+O objeto retornado por conn.cursor() implementa métodos similares ao padrão DB-API:
 
+> 🔎 .description
+Retorna metadados das colunas da última consulta executada:
+
+```python
+cursor.execute("SELECT id, nome FROM produtos")
+print(cursor.description)
+#[('id',), ('nome',)]
+```
+> 🔁 .fetchone()
+Lê uma linha por vez como tupla:
+```python
+linha = cursor.fetchone()
+while linha:
+    print(linha)
+    linha = cursor.fetchone()
+```
 ---
 
 ### ⚙️ **Consulta Simplificada com `execute_query()` (para uso com `wborm`)**
@@ -172,7 +191,7 @@ Este projeto é licenciado sob a **Licença MIT**. Consulte o arquivo [`LICENSE`
 
 ---
 
-# 📌 **wbjdbc (v1.1.4) - English Version**
+# 📌 **wbjdbc (v1.2.0) - English Version**
 
 ## 📌 What is `wbjdbc`?
 
@@ -232,6 +251,31 @@ for row in results:
 
 cursor.close()
 conn.close()
+```
+
+---
+
+### 🧩 **Additional cursor methods**
+
+The object returned by `conn.cursor()` implements methods similar to the Python DB-API standard:
+
+> 🔎 `.description`
+> Returns metadata about the columns of the last executed query:
+
+```python
+cursor.execute("SELECT id, name FROM products")
+print(cursor.description)
+# [('id',), ('name',)]
+```
+
+> 🔁 `.fetchone()`
+> Fetches one row at a time as a tuple:
+
+```python
+row = cursor.fetchone()
+while row:
+    print(row)
+    row = cursor.fetchone()
 ```
 
 ---
