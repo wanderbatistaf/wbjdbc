@@ -69,7 +69,7 @@ def install_dependencies():
 
 setup(
     name="wbjdbc",
-    version="1.2.0",
+    version="1.2.1",
     packages=find_packages(),
     include_package_data=True,
     package_data={
