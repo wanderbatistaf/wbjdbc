@@ -1,6 +1,16 @@
 import os
+import socket
 from .jvm import start_jvm
 import jaydebeapi
+
+# Import optimized components
+from .config import get_config, Config
+from .logging_config import get_logger
+from .metrics import get_metrics_collector
+from .pool import get_pool, close_all_pools
+from .cache import get_schema_cache, reset_cache
+from .types import TypeMapper, JDBC_TYPES
+from .optimized import OptimizedJDBCConnection, OptimizedJDBCCursor
 
 # Default configuration for database drivers
 DEFAULT_DRIVERS = {
@@ -20,6 +30,9 @@ DEFAULT_DRIVERS = {
         "jar": os.path.join(os.path.dirname(__file__), "resources", "maven", "postgresql", "postgresql-42.2.24.jar"),
     },
 }
+
+# Version
+__version__ = "2.0.0"
 
 
 class ConnectionError(Exception):
@@ -165,3 +178,178 @@ def connect_to_db(db_type, host, database, user, password, port=None, server=Non
     except jaydebeapi.DatabaseError as e:
         print(f"❌ Error connecting to the database: {e}")
         return None
+
+
+def connect_optimized(
+    db_type=None,
+    host=None,
+    database=None,
+    user=None,
+    password=None,
+    port=None,
+    server=None,
+    use_pool=True,
+    enable_type_mapping=True,
+    isolation_level=None,
+    config_file=None,
+    **kwargs
+):
+    """
+    Create an optimized JDBC connection with pooling, batching, and async support.
+
+    This is the new optimized API that provides:
+    - Connection pooling for better performance
+    - Batch execution for bulk operations
+    - Async query execution
+    - Automatic type mapping (JDBC types to Python types)
+    - Metadata caching
+    - Query metrics and logging
+    - Dirty reads support for Informix
+
+    Args:
+        db_type: Database type ("informix-sqli", "mysql", "postgresql", or 1-3)
+        host: Database server address
+        database: Database name
+        user: Username
+        password: Password
+        port: Port (optional, uses default if not specified)
+        server: Informix server name (required for Informix)
+        use_pool: Use connection pooling (default: True)
+        enable_type_mapping: Enable automatic JDBC to Python type conversion (default: True)
+        isolation_level: Transaction isolation level (e.g., "DIRTY_READ" for Informix)
+        config_file: Path to .env configuration file
+        **kwargs: Additional configuration options
+
+    Returns:
+        OptimizedJDBCConnection: Enhanced connection with all optimization features
+
+    Example:
+        # Basic usage with pooling
+        conn = connect_optimized(
+            db_type="informix-sqli",
+            host="myserver",
+            database="mydb",
+            user="myuser",
+            password="mypass",
+            server="informix_server"
+        )
+
+        # Execute query
+        results = conn.execute_query("SELECT * FROM mytable")
+
+        # Batch insert
+        conn.execute_batch(
+            "INSERT INTO mytable (col1, col2) VALUES (?, ?)",
+            [(1, 'a'), (2, 'b'), (3, 'c')]
+        )
+
+        # Async query
+        future = conn.execute_async("SELECT COUNT(*) FROM bigtable")
+        result = future.result()  # Wait for completion
+
+        # Dirty reads for Informix
+        conn = connect_optimized(
+            db_type="informix-sqli",
+            host="myserver",
+            database="mydb",
+            user="myuser",
+            password="mypass",
+            server="informix_server",
+            isolation_level="DIRTY_READ"
+        )
+
+        # Using context manager
+        with connect_optimized(...) as conn:
+            results = conn.execute_query("SELECT * FROM mytable")
+            # Auto-commits on success, rolls back on error
+    """
+    # Load configuration
+    config = get_config(config_file)
+
+    # Maps integer values to strings
+    db_type_mapping = {1: "informix-sqli", 2: "mysql", 3: "postgresql"}
+    if db_type is not None:
+        db_type = db_type_mapping.get(db_type, db_type)
+
+    # Use config defaults if parameters not provided
+    config_params = config.get_db_connection_params()
+
+    if db_type is None:
+        db_type = kwargs.get('db_type')
+    if host is None:
+        host = config_params.get('host')
+    if database is None:
+        database = config_params.get('database')
+    if user is None:
+        user = config_params.get('user')
+    if password is None:
+        password = config_params.get('password')
+    if port is None and 'port' in config_params:
+        port = config_params.get('port')
+    if server is None and 'server' in config_params:
+        server = config_params.get('server')
+
+    # Check for Informix dirty reads config
+    if isolation_level is None and db_type == "informix-sqli":
+        if config.get('INFORMIX_DIRTY_READS', False):
+            isolation_level = 'DIRTY_READ'
+        else:
+            isolation_level = config.get('INFORMIX_ISOLATION_LEVEL')
+
+    # Validate required parameters
+    if not all([db_type, host, database, user, password]):
+        raise ValueError(
+            "Missing required connection parameters. "
+            "Provide db_type, host, database, user, and password, "
+            "or configure them in .env file."
+        )
+
+    if db_type not in DEFAULT_DRIVERS:
+        raise ValueError(f"Unsupported database type: {db_type}")
+
+    # Create optimized connection
+    return OptimizedJDBCConnection(
+        db_type=db_type,
+        host=host,
+        database=database,
+        user=user,
+        password=password,
+        port=port,
+        server=server,
+        use_pool=use_pool,
+        enable_type_mapping=enable_type_mapping,
+        isolation_level=isolation_level,
+        **kwargs
+    )
+
+
+# Export public API
+__all__ = [
+    # Legacy API (backward compatible)
+    'connect_to_db',
+    'start_jvm',
+    'JDBCConnection',
+    'JDBCCursor',
+    'ConnectionError',
+    'DEFAULT_DRIVERS',
+
+    # Optimized API (new)
+    'connect_optimized',
+    'OptimizedJDBCConnection',
+    'OptimizedJDBCCursor',
+
+    # Configuration and utilities
+    'get_config',
+    'Config',
+    'get_logger',
+    'get_metrics_collector',
+    'get_pool',
+    'close_all_pools',
+    'get_schema_cache',
+    'reset_cache',
+    'TypeMapper',
+    'JDBC_TYPES',
+
+    # Version
+    '__version__',
+]
