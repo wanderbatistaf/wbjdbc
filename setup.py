@@ -69,7 +69,7 @@ def install_dependencies():
 
 setup(
     name="wbjdbc",
-    version="1.2.1",
+    version="2.0.0",
     packages=find_packages(),
     include_package_data=True,
     package_data={
@@ -84,7 +84,7 @@ setup(
         "jaydebeapi",
         "JPype1>=1.3.0"
     ],
-    description="Library to simplify JDBC and JVM configuration for Informix and MongoDB",
+    description="Optimized Python-Java JDBC bridge with connection pooling, batch execution, async queries, and caching for Informix and MongoDB",
     long_description=long_description,
     long_description_content_type="text/markdown",
     author="Wanderson Batista",
