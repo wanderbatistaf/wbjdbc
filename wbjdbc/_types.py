@@ -5,6 +5,13 @@ import datetime
 _SENSITIVE = frozenset({"password", "senha", "secret"})
 _NAMED_RE = re.compile(r":([a-zA-Z_][a-zA-Z0-9_]*)")
 
+_INT_CLASSES = frozenset({
+    "java.lang.Short", "java.lang.Integer", "java.lang.Long", "java.lang.Byte",
+})
+_FLOAT_CLASSES = frozenset({
+    "java.lang.Float", "java.lang.Double",
+})
+
 
 def _j2p(obj, decimal_as_float=False):
     """Convert a JDBC/Java value to a Python-native value."""
@@ -14,6 +21,14 @@ def _j2p(obj, decimal_as_float=False):
         cn = obj.getClass().getName()
     except AttributeError:
         return obj
+    if cn in _INT_CLASSES:
+        return int(obj)
+    if cn in _FLOAT_CLASSES:
+        return float(obj)
+    if cn == "java.lang.Boolean":
+        return bool(obj)
+    if cn in ("java.lang.String", "java.lang.Character"):
+        return str(obj).strip()
     if cn == "java.math.BigDecimal":
         return float(str(obj)) if decimal_as_float else decimal.Decimal(str(obj))
     if cn == "java.sql.Date":
@@ -29,7 +44,7 @@ def _j2p(obj, decimal_as_float=False):
     if cn == "java.sql.Time":
         lt = obj.toLocalTime()
         return datetime.time(lt.getHour(), lt.getMinute(), lt.getSecond())
-    return obj
+    return str(obj).strip()
 
 
 def _set_param(pstmt, idx, val):
@@ -39,7 +54,8 @@ def _set_param(pstmt, idx, val):
     elif isinstance(val, bool):
         pstmt.setBoolean(idx, val)
     elif isinstance(val, int):
-        pstmt.setLong(idx, val)
+        import jpype
+        pstmt.setLong(idx, jpype.JLong(val))
     elif isinstance(val, float):
         pstmt.setDouble(idx, val)
     elif isinstance(val, decimal.Decimal):

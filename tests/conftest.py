@@ -12,6 +12,7 @@ def _build_jpype_stub():
     jpype.JObject = object
     jpype.JArray = object
     jpype.JByte = object
+    jpype.JLong = lambda v: v
 
     java = types.SimpleNamespace(
         lang=types.SimpleNamespace(

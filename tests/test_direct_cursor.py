@@ -365,7 +365,9 @@ class TestSetParam:
     def test_int_calls_setlong(self):
         pstmt = self._pstmt()
         _set_param(pstmt, 1, 42)
-        pstmt.setLong.assert_called_once_with(1, 42)
+        args = pstmt.setLong.call_args[0]
+        assert args[0] == 1
+        assert int(args[1]) == 42
 
     def test_float_calls_setdouble(self):
         pstmt = self._pstmt()
