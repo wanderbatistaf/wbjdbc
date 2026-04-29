@@ -5,7 +5,12 @@ import time
 import platform
 import glob
 import jpype
-from pkg_resources import resource_filename
+
+_PKG_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _pkg_path(*parts):
+    return os.path.join(_PKG_DIR, *parts)
 
 class JVMError(Exception):
     """Custom class for JVM-related errors."""
@@ -18,7 +23,7 @@ def ensure_jpype_installed():
         # Debug
         # print("✅ JPype1 is already installed.")
     except ImportError:
-        wheels_dir = resource_filename("wbjdbc", "wheels")
+        wheels_dir = _pkg_path("wheels")
         if not os.path.isdir(wheels_dir):
             raise JVMError(f"❌ Wheels directory not found: {wheels_dir}")
         
@@ -166,11 +171,11 @@ def start_jvm(jars=None, java_home=None, debug=0):
             jars = []
         
         # Adds the Informix JAR
-        informix_jar = resource_filename("wbjdbc", "resources/maven/com.ibm.informix/jdbc-4.50.10.1.jar")
+        informix_jar = _pkg_path("resources", "maven", "com.ibm.informix", "jdbc-4.50.10.1.jar")
         jars.insert(0, informix_jar)
-        
+
         # Adds the BSON JAR (MongoDB)
-        bson_jar = resource_filename("wbjdbc", "resources/maven/org.mongodb/bson-3.8.0.jar")
+        bson_jar = _pkg_path("resources", "maven", "org.mongodb", "bson-3.8.0.jar")
         if os.path.isfile(bson_jar):
             jars.append(bson_jar)
         else:
