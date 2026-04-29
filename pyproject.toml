@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "wbjdbc"
+version = "2.0.1"
+description = "Optimized Python-Java JDBC bridge with connection pooling, batch execution, async queries, and caching for Informix and MongoDB"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "Wanderson Batista", email = "wanderfreitasb@gmail.com"}
+]
+requires-python = ">=3.8"
+dependencies = [
+    "jaydebeapi",
+    "JPype1>=1.3.0",
+]
+
+[project.optional-dependencies]
+pandas = ["pandas>=1.0"]
+test = ["pytest>=7.0", "pytest-asyncio"]
+
+[project.urls]
+Homepage = "https://github.com/wanderbatistaf/wbjdbc"
