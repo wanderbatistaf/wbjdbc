@@ -4,7 +4,7 @@ build-backend = "setuptools.backends.legacy:build"
 
 [project]
 name = "wbjdbc"
-version = "2.0.1"
+version = "2.0.2"
 description = "Optimized Python-Java JDBC bridge with connection pooling, batch execution, async queries, and caching for Informix and MongoDB"
 readme = "README.md"
 license = {text = "MIT"}
