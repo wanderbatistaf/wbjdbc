@@ -6,6 +6,7 @@ import threading
 import decimal
 import datetime
 import socket
+from collections import OrderedDict
 from .jvm import start_jvm
 import jaydebeapi
 
@@ -39,8 +40,10 @@ DEFAULT_DRIVERS = {
 }
 
 # Version
-__version__ = "2.0.2"
+__version__ = "2.0.4"
 version = __version__
+
+_STMT_CACHE_SIZE = 20
 
 
 def _get_jpype():
@@ -69,8 +72,10 @@ def _is_sensitive_sql(sql):
 class _DirectCursor:
     """JDBC cursor that calls Java directly via JPype, bypassing jaydebeapi's global lock."""
 
-    def __init__(self, java_conn, decimal_as_float=False, query_timeout_sec=30, slow_query_ms=500):
+    def __init__(self, java_conn, stmt_cache=None, decimal_as_float=False,
+                 query_timeout_sec=30, slow_query_ms=500):
         self._jc = java_conn
+        self._stmt_cache = stmt_cache if stmt_cache is not None else OrderedDict()
         self._decimal_as_float = decimal_as_float
         self._query_timeout_sec = query_timeout_sec
         self._slow_query_ms = slow_query_ms
@@ -79,10 +84,27 @@ class _DirectCursor:
         self.description = None
         self.rowcount = -1
 
+    def _get_pstmt(self, sql):
+        """Return a cached PreparedStatement for sql, evicting oldest if cache is full."""
+        if sql in self._stmt_cache:
+            pstmt = self._stmt_cache.pop(sql)
+            self._stmt_cache[sql] = pstmt
+            return pstmt
+        if len(self._stmt_cache) >= _STMT_CACHE_SIZE:
+            _, old = self._stmt_cache.popitem(last=False)
+            try:
+                old.close()
+            except Exception:
+                pass
+        pstmt = self._jc.prepareStatement(sql)
+        self._stmt_cache[sql] = pstmt
+        return pstmt
+
     def execute(self, sql, params=None):
         if isinstance(params, dict):
             sql, params = _rewrite_named(sql, params)
-        pstmt = self._jc.prepareStatement(sql)
+        pstmt = self._get_pstmt(sql)
+        pstmt.clearParameters()
         if self._query_timeout_sec:
             pstmt.setQueryTimeout(self._query_timeout_sec)
         if params:
@@ -113,7 +135,6 @@ class _DirectCursor:
                 self._cols = []
                 self.description = None
         finally:
-            pstmt.close()
             elapsed_ms = (time.monotonic() - t0) * 1000
             if elapsed_ms > self._slow_query_ms:
                 safe = None if _is_sensitive_sql(sql) else params
@@ -124,7 +145,8 @@ class _DirectCursor:
     def executemany(self, sql, params_list):
         if params_list and isinstance(params_list[0], dict):
             sql, _ = _rewrite_named(sql, params_list[0])
-        pstmt = self._jc.prepareStatement(sql)
+        pstmt = self._get_pstmt(sql)
+        pstmt.clearParameters()
         if self._query_timeout_sec:
             pstmt.setQueryTimeout(self._query_timeout_sec)
         for params in params_list:
@@ -134,7 +156,6 @@ class _DirectCursor:
                 _set_param(pstmt, i, v)
             pstmt.addBatch()
         counts = pstmt.executeBatch()
-        pstmt.close()
         self.rowcount = sum(int(c) for c in counts if int(c) >= 0)
         return self.rowcount
 
@@ -177,16 +198,31 @@ class _PooledConn:
         self._pool = pool
         self._created_at = time.monotonic()
         self.pool_key = pool_key
+        self._stmt_cache = OrderedDict()
 
     def cursor(self):
         if self._pool is not None:
             return _DirectCursor(
                 self._jc,
+                stmt_cache=self._stmt_cache,
                 decimal_as_float=self._pool._decimal_as_float,
                 query_timeout_sec=self._pool._query_timeout_sec,
                 slow_query_ms=self._pool._slow_query_ms,
             )
-        return _DirectCursor(self._jc)
+        return _DirectCursor(self._jc, stmt_cache=self._stmt_cache)
+
+    def _close_jconn(self):
+        """Close all cached statements then the underlying Java connection."""
+        for pstmt in list(self._stmt_cache.values()):
+            try:
+                pstmt.close()
+            except Exception:
+                pass
+        self._stmt_cache.clear()
+        try:
+            self._jc.close()
+        except Exception:
+            pass
 
     def execute_query(self, sql, params=None):
         cur = self.cursor()
@@ -269,12 +305,23 @@ class ConnectionPool:
         self._max_wait_ms = 0.0
         self._active_count = 0
 
+        self._prewarm_done = threading.Event()
+
         start_jvm(self._jars)
         jpype = _get_jpype()
         jpype.JClass(self._driver_class)
 
-        for _ in range(pool_size):
-            self._idle.append(self._new_conn())
+        def _prewarm():
+            for _ in range(self._pool_size):
+                try:
+                    pc = self._new_conn()
+                    with self._lock:
+                        self._idle.append(pc)
+                except Exception:
+                    pass
+            self._prewarm_done.set()
+
+        threading.Thread(target=_prewarm, daemon=True).start()
 
     def _new_conn(self):
         jpype = _get_jpype()
@@ -310,6 +357,7 @@ class ConnectionPool:
                 pc = self._idle.pop()
                 if self._is_alive(pc):
                     return pc
+                pc._close_jconn()
         return self._new_conn()
 
     def _return(self, pc):
@@ -343,10 +391,7 @@ class ConnectionPool:
     def close(self):
         with self._lock:
             for pc in self._idle:
-                try:
-                    pc._jc.close()
-                except Exception:
-                    pass
+                pc._close_jconn()
             self._idle.clear()
 
 

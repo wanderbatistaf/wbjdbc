@@ -148,13 +148,13 @@ class TestDirectCursorDML:
 
         pstmt.setQueryTimeout.assert_called_once_with(15)
 
-    def test_pstmt_always_closed(self):
+    def test_pstmt_cached_not_closed_after_execute(self):
         jc, pstmt = _make_java_conn(update_count=0)
 
         cur = _cursor(jc)
         cur.execute("DELETE FROM t WHERE 1=0")
 
-        pstmt.close.assert_called_once()
+        pstmt.close.assert_not_called()
 
 
 class TestExecuteMany:
@@ -196,14 +196,86 @@ class TestExecuteMany:
         pstmt.addBatch.assert_called_once()
         pstmt.executeBatch.assert_called_once()
 
-    def test_executemany_pstmt_closed(self):
+    def test_executemany_pstmt_cached_not_closed(self):
         jc, pstmt = _make_java_conn()
         pstmt.executeBatch.return_value = [1]
 
         cur = _cursor(jc)
         cur.executemany("INSERT INTO t VALUES (?)", [(1,)])
 
-        pstmt.close.assert_called_once()
+        pstmt.close.assert_not_called()
+
+
+class TestStatementCache:
+    def test_same_sql_reuses_pstmt(self):
+        jc = MagicMock()
+        pstmt = MagicMock()
+        pstmt.executeUpdate.return_value = 1
+        jc.prepareStatement.return_value = pstmt
+
+        from collections import OrderedDict
+        cache = OrderedDict()
+        from wbjdbc import _DirectCursor
+        cur = _DirectCursor(jc, stmt_cache=cache, query_timeout_sec=0, slow_query_ms=999999)
+
+        cur.execute("UPDATE t SET a=1")
+        cur.execute("UPDATE t SET a=1")
+
+        assert jc.prepareStatement.call_count == 1
+
+    def test_different_sql_creates_new_pstmt(self):
+        jc = MagicMock()
+        jc.prepareStatement.side_effect = lambda s: MagicMock(executeUpdate=MagicMock(return_value=1))
+
+        from collections import OrderedDict
+        from wbjdbc import _DirectCursor
+        cur = _DirectCursor(jc, stmt_cache=OrderedDict(), query_timeout_sec=0, slow_query_ms=999999)
+
+        cur.execute("UPDATE t SET a=1")
+        cur.execute("UPDATE t SET b=2")
+
+        assert jc.prepareStatement.call_count == 2
+
+    def test_cache_eviction_closes_oldest_pstmt(self):
+        from collections import OrderedDict
+        from wbjdbc import _DirectCursor, _STMT_CACHE_SIZE
+
+        jc = MagicMock()
+        pstmts = {}
+
+        def make_pstmt(sql):
+            m = MagicMock()
+            m.executeUpdate.return_value = 1
+            pstmts[sql] = m
+            return m
+
+        jc.prepareStatement.side_effect = make_pstmt
+
+        cache = OrderedDict()
+        cur = _DirectCursor(jc, stmt_cache=cache, query_timeout_sec=0, slow_query_ms=999999)
+
+        sqls = [f"UPDATE t SET col{i}=?" for i in range(_STMT_CACHE_SIZE + 1)]
+        for sql in sqls:
+            cur.execute(sql)
+
+        first_sql = sqls[0]
+        pstmts[first_sql].close.assert_called_once()
+        assert first_sql not in cache
+
+    def test_clearparameters_called_on_reuse(self):
+        jc = MagicMock()
+        pstmt = MagicMock()
+        pstmt.executeUpdate.return_value = 1
+        jc.prepareStatement.return_value = pstmt
+
+        from collections import OrderedDict
+        from wbjdbc import _DirectCursor
+        cur = _DirectCursor(jc, stmt_cache=OrderedDict(), query_timeout_sec=0, slow_query_ms=999999)
+
+        cur.execute("UPDATE t SET a=?", (1,))
+        cur.execute("UPDATE t SET a=?", (2,))
+
+        assert pstmt.clearParameters.call_count == 2
 
 
 class TestNamedParams:

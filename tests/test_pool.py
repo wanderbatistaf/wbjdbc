@@ -37,10 +37,18 @@ def _build_pool(pool_size=2, max_overflow=2, checkout_timeout=5, **kwargs):
             **kwargs,
         )
 
+    pool._prewarm_done.wait(timeout=1.0)
+
     def _patched_new_conn():
-        return _PooledConn(_mock_jconn(), pool)
+        return _PooledConn(mock_jconn, pool)
 
     pool._new_conn = _patched_new_conn
+
+    with pool._lock:
+        pool._idle.clear()
+        for _ in range(pool_size):
+            pool._idle.append(_patched_new_conn())
+
     pool._mock_jconn = mock_jconn
     pool._mock_jpype = mock_jpype
     return pool
