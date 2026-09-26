@@ -14,6 +14,8 @@ import json
 from .config import get_config
 from .logging_config import get_logger
 
+_MAX_QUERY_STATS_ENTRIES = 500
+
 
 class MetricsCollector:
     """Collects and tracks metrics for wbjdbc operations."""
@@ -62,8 +64,12 @@ class MetricsCollector:
             else:
                 self._metrics['queries_failed'] += 1
 
-            # Track per-query stats (using first 100 chars as key)
+            # Track per-query stats (using first 100 chars as key), capped to
+            # bound memory when callers execute many distinct dynamic queries.
             query_key = query[:100] if len(query) > 100 else query
+            if query_key not in self._query_stats and len(self._query_stats) >= _MAX_QUERY_STATS_ENTRIES:
+                oldest_key = next(iter(self._query_stats))
+                del self._query_stats[oldest_key]
             self._query_stats[query_key]['count'] += 1
             self._query_stats[query_key]['total_time'] += duration
             if not success:

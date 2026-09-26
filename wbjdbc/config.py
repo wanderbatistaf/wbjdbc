@@ -21,11 +21,19 @@ class Config:
             env_file: Path to .env file. If None, looks for .env in current directory.
         """
         self._config = {}
+        self._file_overrides: Dict[str, str] = {}
         self._load_env_file(env_file)
         self._load_defaults()
 
     def _load_env_file(self, env_file: Optional[str] = None):
-        """Load configuration from .env file if it exists."""
+        """Load configuration from .env file if it exists.
+
+        Values are kept in an instance-local dict rather than written into
+        os.environ: mutating the whole process environment as a side effect of
+        constructing a Config (or connecting to a database) is surprising, leaks
+        into any subprocess spawned later, and made Config() non-deterministic
+        across instances within the same process.
+        """
         if env_file is None:
             env_file = os.path.join(os.getcwd(), '.env')
 
@@ -37,65 +45,71 @@ class Config:
                         key, value = line.split('=', 1)
                         key = key.strip()
                         value = value.strip().strip('"').strip("'")
-                        os.environ[key] = value
+                        self._file_overrides[key] = value
+
+    def _env(self, key: str, default: Any = None) -> Any:
+        """Resolve a config value: .env file overrides > process environment > default."""
+        if key in self._file_overrides:
+            return self._file_overrides[key]
+        return os.getenv(key, default)
 
     def _load_defaults(self):
         """Load default configuration values."""
         self._config = {
             # Connection Pool Settings
-            'POOL_SIZE': int(os.getenv('WBJDBC_POOL_SIZE', '10')),
-            'POOL_MAX_SIZE': int(os.getenv('WBJDBC_POOL_MAX_SIZE', '20')),
-            'POOL_TIMEOUT': float(os.getenv('WBJDBC_POOL_TIMEOUT', '30.0')),
-            'POOL_RECYCLE': int(os.getenv('WBJDBC_POOL_RECYCLE', '3600')),  # 1 hour
-            'POOL_PRE_PING': os.getenv('WBJDBC_POOL_PRE_PING', 'true').lower() == 'true',
+            'POOL_SIZE': int(self._env('WBJDBC_POOL_SIZE', '10')),
+            'POOL_MAX_SIZE': int(self._env('WBJDBC_POOL_MAX_SIZE', '20')),
+            'POOL_TIMEOUT': float(self._env('WBJDBC_POOL_TIMEOUT', '30.0')),
+            'POOL_RECYCLE': int(self._env('WBJDBC_POOL_RECYCLE', '3600')),  # 1 hour
+            'POOL_PRE_PING': str(self._env('WBJDBC_POOL_PRE_PING', 'true')).lower() == 'true',
 
             # Connection Settings
-            'CONNECTION_TIMEOUT': float(os.getenv('WBJDBC_CONNECTION_TIMEOUT', '10.0')),
-            'QUERY_TIMEOUT': float(os.getenv('WBJDBC_QUERY_TIMEOUT', '30.0')),
-            'MAX_RETRIES': int(os.getenv('WBJDBC_MAX_RETRIES', '3')),
-            'RETRY_DELAY': float(os.getenv('WBJDBC_RETRY_DELAY', '1.0')),
-            'AUTO_RECONNECT': os.getenv('WBJDBC_AUTO_RECONNECT', 'true').lower() == 'true',
+            'CONNECTION_TIMEOUT': float(self._env('WBJDBC_CONNECTION_TIMEOUT', '10.0')),
+            'QUERY_TIMEOUT': float(self._env('WBJDBC_QUERY_TIMEOUT', '30.0')),
+            'MAX_RETRIES': int(self._env('WBJDBC_MAX_RETRIES', '3')),
+            'RETRY_DELAY': float(self._env('WBJDBC_RETRY_DELAY', '1.0')),
+            'AUTO_RECONNECT': str(self._env('WBJDBC_AUTO_RECONNECT', 'true')).lower() == 'true',
 
             # Batch Execution Settings
-            'BATCH_SIZE': int(os.getenv('WBJDBC_BATCH_SIZE', '1000')),
-            'BATCH_COMMIT_INTERVAL': int(os.getenv('WBJDBC_BATCH_COMMIT_INTERVAL', '5000')),
+            'BATCH_SIZE': int(self._env('WBJDBC_BATCH_SIZE', '1000')),
+            'BATCH_COMMIT_INTERVAL': int(self._env('WBJDBC_BATCH_COMMIT_INTERVAL', '5000')),
 
             # Metadata Cache Settings
-            'CACHE_ENABLED': os.getenv('WBJDBC_CACHE_ENABLED', 'true').lower() == 'true',
-            'CACHE_TTL': int(os.getenv('WBJDBC_CACHE_TTL', '3600')),  # 1 hour
-            'CACHE_MAX_SIZE': int(os.getenv('WBJDBC_CACHE_MAX_SIZE', '1000')),
+            'CACHE_ENABLED': str(self._env('WBJDBC_CACHE_ENABLED', 'true')).lower() == 'true',
+            'CACHE_TTL': int(self._env('WBJDBC_CACHE_TTL', '3600')),  # 1 hour
+            'CACHE_MAX_SIZE': int(self._env('WBJDBC_CACHE_MAX_SIZE', '1000')),
 
             # Async Settings
-            'ASYNC_ENABLED': os.getenv('WBJDBC_ASYNC_ENABLED', 'true').lower() == 'true',
-            'ASYNC_MAX_WORKERS': int(os.getenv('WBJDBC_ASYNC_MAX_WORKERS', '50')),
+            'ASYNC_ENABLED': str(self._env('WBJDBC_ASYNC_ENABLED', 'true')).lower() == 'true',
+            'ASYNC_MAX_WORKERS': int(self._env('WBJDBC_ASYNC_MAX_WORKERS', '50')),
 
             # Logging Settings
-            'LOG_LEVEL': os.getenv('WBJDBC_LOG_LEVEL', 'INFO'),
-            'LOG_FILE': os.getenv('WBJDBC_LOG_FILE', ''),
-            'LOG_FORMAT': os.getenv('WBJDBC_LOG_FORMAT',
+            'LOG_LEVEL': self._env('WBJDBC_LOG_LEVEL', 'INFO'),
+            'LOG_FILE': self._env('WBJDBC_LOG_FILE', ''),
+            'LOG_FORMAT': self._env('WBJDBC_LOG_FORMAT',
                                    '%(asctime)s - %(name)s - %(levelname)s - %(message)s'),
-            'LOG_SQL_QUERIES': os.getenv('WBJDBC_LOG_SQL_QUERIES', 'false').lower() == 'true',
+            'LOG_SQL_QUERIES': str(self._env('WBJDBC_LOG_SQL_QUERIES', 'false')).lower() == 'true',
 
             # Metrics Settings
-            'METRICS_ENABLED': os.getenv('WBJDBC_METRICS_ENABLED', 'true').lower() == 'true',
-            'METRICS_FILE': os.getenv('WBJDBC_METRICS_FILE', ''),
-            'METRICS_PROMETHEUS': os.getenv('WBJDBC_METRICS_PROMETHEUS', 'false').lower() == 'true',
+            'METRICS_ENABLED': str(self._env('WBJDBC_METRICS_ENABLED', 'true')).lower() == 'true',
+            'METRICS_FILE': self._env('WBJDBC_METRICS_FILE', ''),
+            'METRICS_PROMETHEUS': str(self._env('WBJDBC_METRICS_PROMETHEUS', 'false')).lower() == 'true',
 
             # Informix Specific Settings
-            'INFORMIX_DIRTY_READS': os.getenv('WBJDBC_INFORMIX_DIRTY_READS', 'false').lower() == 'true',
-            'INFORMIX_ISOLATION_LEVEL': os.getenv('WBJDBC_INFORMIX_ISOLATION_LEVEL', 'READ_COMMITTED'),
+            'INFORMIX_DIRTY_READS': str(self._env('WBJDBC_INFORMIX_DIRTY_READS', 'false')).lower() == 'true',
+            'INFORMIX_ISOLATION_LEVEL': self._env('WBJDBC_INFORMIX_ISOLATION_LEVEL', 'READ_COMMITTED'),
 
             # Database Connection Defaults
-            'DB_HOST': os.getenv('WBJDBC_DB_HOST', 'localhost'),
-            'DB_PORT': os.getenv('WBJDBC_DB_PORT', ''),
-            'DB_NAME': os.getenv('WBJDBC_DB_NAME', ''),
-            'DB_USER': os.getenv('WBJDBC_DB_USER', ''),
-            'DB_PASSWORD': os.getenv('WBJDBC_DB_PASSWORD', ''),
-            'DB_SERVER': os.getenv('WBJDBC_DB_SERVER', ''),  # For Informix
+            'DB_HOST': self._env('WBJDBC_DB_HOST', 'localhost'),
+            'DB_PORT': self._env('WBJDBC_DB_PORT', ''),
+            'DB_NAME': self._env('WBJDBC_DB_NAME', ''),
+            'DB_USER': self._env('WBJDBC_DB_USER', ''),
+            'DB_PASSWORD': self._env('WBJDBC_DB_PASSWORD', ''),
+            'DB_SERVER': self._env('WBJDBC_DB_SERVER', ''),  # For Informix
 
             # Security Settings
-            'SSL_ENABLED': os.getenv('WBJDBC_SSL_ENABLED', 'false').lower() == 'true',
-            'SSL_VERIFY': os.getenv('WBJDBC_SSL_VERIFY', 'true').lower() == 'true',
+            'SSL_ENABLED': str(self._env('WBJDBC_SSL_ENABLED', 'false')).lower() == 'true',
+            'SSL_VERIFY': str(self._env('WBJDBC_SSL_VERIFY', 'true')).lower() == 'true',
         }
 
     def get(self, key: str, default: Any = None) -> Any:

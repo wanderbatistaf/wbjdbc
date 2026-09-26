@@ -285,6 +285,13 @@ class TestNamedParams:
         assert new_sql == "SELECT * FROM t WHERE zone = ? AND bay = ?"
         assert params == ["A", 1]
 
+    def test_rewrite_named_ignores_postgres_style_cast(self):
+        """`col::type` casts must not be mistaken for a `:type` named parameter."""
+        sql = "SELECT col::text, :id FROM t WHERE id = :id"
+        new_sql, params = _rewrite_named(sql, {"id": 5})
+        assert new_sql == "SELECT col::text, ? FROM t WHERE id = ?"
+        assert params == [5, 5]
+
     def test_rewrite_preserves_order(self):
         sql = "INSERT INTO t (a, b, c) VALUES (:c, :a, :b)"
         new_sql, params = _rewrite_named(sql, {"a": 1, "b": 2, "c": 3})
@@ -300,6 +307,50 @@ class TestNamedParams:
         cur.execute("SELECT v FROM t WHERE id = :id", {"id": 1})
 
         assert cur.rowcount == 1
+
+
+class TestDirectCursorMetrics:
+    def test_execute_records_query_metric(self):
+        from wbjdbc.metrics import get_metrics_collector, reset_metrics
+
+        reset_metrics()
+        meta = _make_meta(["v"])
+        rs = _make_rs(meta, [(1,)])
+        jc, _ = _make_java_conn(rs=rs)
+
+        cur = _cursor(jc)
+        cur.execute("SELECT v FROM t")
+
+        stats = get_metrics_collector().get_metrics()
+        assert stats["queries"]["total"] == 1
+        assert stats["queries"]["failed"] == 0
+
+    def test_execute_records_failed_query_metric(self):
+        from wbjdbc.metrics import get_metrics_collector, reset_metrics
+
+        reset_metrics()
+        jc, pstmt = _make_java_conn(update_count=0)
+        pstmt.executeUpdate.side_effect = Exception("boom")
+
+        cur = _cursor(jc)
+        with pytest.raises(Exception):
+            cur.execute("DELETE FROM t")
+
+        stats = get_metrics_collector().get_metrics()
+        assert stats["queries"]["failed"] == 1
+
+    def test_executemany_records_batch_metric(self):
+        from wbjdbc.metrics import get_metrics_collector, reset_metrics
+
+        reset_metrics()
+        jc, pstmt = _make_java_conn()
+        pstmt.executeBatch.return_value = [1, 1]
+
+        cur = _cursor(jc)
+        cur.executemany("INSERT INTO t VALUES (?)", [(1,), (2,)])
+
+        stats = get_metrics_collector().get_metrics()
+        assert stats["batch_operations"] == 1
 
 
 class TestFetchDf:

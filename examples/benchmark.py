@@ -3,9 +3,9 @@ Performance benchmarks for wbjdbc optimized vs legacy API.
 
 This script validates the performance targets:
 - Connection acquisition: <50ms for pooled connections
-- Batch operations: ≥5x faster than individual statements
-- Query concurrency: ≥50 simultaneous queries without degradation
-- Metadata cache: ≥90% reduction in repeated schema queries
+- Batch operations: >=5x faster than individual statements
+- Query concurrency: >=50 simultaneous queries without degradation
+- Metadata cache: >=90% reduction in repeated schema queries
 """
 
 import time
@@ -58,19 +58,19 @@ def benchmark_connection_acquisition():
     print(f"  Max: {max_time:.2f}ms")
 
     if avg_time < 50:
-        print(f"  ✅ PASSED - Average time {avg_time:.2f}ms < 50ms target")
+        print(f"  [OK] PASSED - Average time {avg_time:.2f}ms < 50ms target")
     else:
-        print(f"  ❌ FAILED - Average time {avg_time:.2f}ms >= 50ms target")
+        print(f"  [ERROR] FAILED - Average time {avg_time:.2f}ms >= 50ms target")
 
     print()
 
 
 def benchmark_batch_operations():
-    """Benchmark: Batch vs individual operations (≥5x faster target)."""
+    """Benchmark: Batch vs individual operations (>=5x faster target)."""
     print("=" * 70)
     print("BENCHMARK 2: Batch Operations Performance")
     print("=" * 70)
-    print("Target: ≥5x faster than individual statements\n")
+    print("Target: >=5x faster than individual statements\n")
 
     conn = connect_optimized(**DB_CONFIG)
 
@@ -134,9 +134,9 @@ def benchmark_batch_operations():
     print(f"  Speedup: {speedup:.1f}x")
 
     if speedup >= 5.0:
-        print(f"  ✅ PASSED - Batch is {speedup:.1f}x faster (≥5x target)")
+        print(f"  [OK] PASSED - Batch is {speedup:.1f}x faster (>=5x target)")
     else:
-        print(f"  ❌ FAILED - Batch is {speedup:.1f}x faster (<5x target)")
+        print(f"  [ERROR] FAILED - Batch is {speedup:.1f}x faster (<5x target)")
 
     # Cleanup
     cursor = conn.cursor()
@@ -149,11 +149,11 @@ def benchmark_batch_operations():
 
 
 def benchmark_concurrent_queries():
-    """Benchmark: Concurrent query execution (≥50 simultaneous queries target)."""
+    """Benchmark: Concurrent query execution (>=50 simultaneous queries target)."""
     print("=" * 70)
     print("BENCHMARK 3: Concurrent Query Performance")
     print("=" * 70)
-    print("Target: ≥50 simultaneous queries without degradation\n")
+    print("Target: >=50 simultaneous queries without degradation\n")
 
     def execute_query(query_id):
         """Execute a single query and return timing."""
@@ -200,16 +200,16 @@ def benchmark_concurrent_queries():
             print(f"  Max query time: {max_time:.3f}s")
             print(f"  Throughput: {num_queries/total_time:.1f} queries/sec")
 
-    print("\n✅ Concurrent query test completed")
+    print("\n[OK] Concurrent query test completed")
     print()
 
 
 def benchmark_metadata_cache():
-    """Benchmark: Metadata caching (≥90% reduction target)."""
+    """Benchmark: Metadata caching (>=90% reduction target)."""
     print("=" * 70)
     print("BENCHMARK 4: Metadata Cache Performance")
     print("=" * 70)
-    print("Target: ≥90% reduction in repeated schema queries\n")
+    print("Target: >=90% reduction in repeated schema queries\n")
 
     conn = connect_optimized(**DB_CONFIG)
 
@@ -251,9 +251,9 @@ def benchmark_metadata_cache():
     print(f"  Reduction: {reduction:.1f}%")
 
     if reduction >= 90:
-        print(f"  ✅ PASSED - Cache provides {reduction:.1f}% reduction (≥90% target)")
+        print(f"  [OK] PASSED - Cache provides {reduction:.1f}% reduction (>=90% target)")
     else:
-        print(f"  ❌ FAILED - Cache provides {reduction:.1f}% reduction (<90% target)")
+        print(f"  [ERROR] FAILED - Cache provides {reduction:.1f}% reduction (<90% target)")
 
     conn.close()
     print()
@@ -307,16 +307,16 @@ def benchmark_overall_metrics():
 def run_all_benchmarks():
     """Run all performance benchmarks."""
     print("\n")
-    print("╔" + "═" * 68 + "╗")
-    print("║" + " " * 15 + "WBJDBC OPTIMIZED PERFORMANCE BENCHMARKS" + " " * 14 + "║")
-    print("╚" + "═" * 68 + "╝")
+    print("+" + "=" * 68 + "+")
+    print("|" + " " * 15 + "WBJDBC OPTIMIZED PERFORMANCE BENCHMARKS" + " " * 14 + "|")
+    print("+" + "=" * 68 + "+")
     print()
 
     print("This benchmark suite validates the performance targets:")
     print("  1. Connection acquisition: <50ms (pooled)")
-    print("  2. Batch operations: ≥5x faster than individual")
-    print("  3. Query concurrency: ≥50 simultaneous queries")
-    print("  4. Metadata cache: ≥90% reduction")
+    print("  2. Batch operations: >=5x faster than individual")
+    print("  3. Query concurrency: >=50 simultaneous queries")
+    print("  4. Metadata cache: >=90% reduction")
     print()
 
     input("Press Enter to start benchmarks...")
@@ -334,7 +334,7 @@ def run_all_benchmarks():
             benchmark()
             time.sleep(1)  # Brief pause between benchmarks
         except Exception as e:
-            print(f"❌ Benchmark failed: {e}\n")
+            print(f"[ERROR] Benchmark failed: {e}\n")
 
     benchmark_overall_metrics()
 
@@ -344,7 +344,7 @@ def run_all_benchmarks():
 
 
 if __name__ == "__main__":
-    print("\n⚠️  NOTE: Update DB_CONFIG with your actual database credentials")
+    print("\n[WARN] NOTE: Update DB_CONFIG with your actual database credentials")
     print("    before running benchmarks.\n")
 
     try:
@@ -352,4 +352,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\n\nBenchmarks interrupted by user.")
     except Exception as e:
-        print(f"\n\n❌ Benchmark suite failed: {e}")
+        print(f"\n\n[ERROR] Benchmark suite failed: {e}")

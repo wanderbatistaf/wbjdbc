@@ -3,7 +3,7 @@ import decimal
 import datetime
 
 _SENSITIVE = frozenset({"password", "senha", "secret"})
-_NAMED_RE = re.compile(r":([a-zA-Z_][a-zA-Z0-9_]*)")
+_NAMED_RE = re.compile(r"(?<!:):([a-zA-Z_][a-zA-Z0-9_]*)")
 
 _INT_CLASSES = frozenset({
     "java.lang.Short", "java.lang.Integer", "java.lang.Long", "java.lang.Byte",

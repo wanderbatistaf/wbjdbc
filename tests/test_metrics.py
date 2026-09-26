@@ -4,7 +4,7 @@ Tests for metrics collection.
 
 import time
 import pytest
-from wbjdbc.metrics import MetricsCollector
+from wbjdbc.metrics import MetricsCollector, _MAX_QUERY_STATS_ENTRIES
 
 
 def test_metrics_initialization():
@@ -162,6 +162,31 @@ def test_query_stats():
     assert query_stats[query]['count'] == 3
     assert query_stats[query]['errors'] == 1
     assert query_stats[query]['avg_time'] > 0
+
+
+def test_query_stats_is_capped():
+    """Distinct dynamic queries must not grow _query_stats without bound."""
+    metrics = MetricsCollector()
+
+    for i in range(_MAX_QUERY_STATS_ENTRIES + 50):
+        metrics.record_query(f"SELECT * FROM t WHERE id = {i}", 0.01, success=True)
+
+    query_stats = metrics.get_query_stats()
+
+    assert len(query_stats) <= _MAX_QUERY_STATS_ENTRIES
+
+
+def test_query_stats_cap_evicts_oldest_first():
+    """Eviction should drop the oldest key, keeping the most recent ones."""
+    metrics = MetricsCollector()
+
+    for i in range(_MAX_QUERY_STATS_ENTRIES + 1):
+        metrics.record_query(f"SELECT {i}", 0.01, success=True)
+
+    query_stats = metrics.get_query_stats()
+
+    assert "SELECT 0" not in query_stats
+    assert f"SELECT {_MAX_QUERY_STATS_ENTRIES}" in query_stats
 
 
 def test_metrics_reset():

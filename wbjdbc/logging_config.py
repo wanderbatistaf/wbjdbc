@@ -9,6 +9,12 @@ import logging
 import sys
 from typing import Optional
 from .config import get_config
+from ._types import _SENSITIVE
+
+
+def _is_sensitive_sql(sql: str) -> bool:
+    sql_lower = sql.lower()
+    return any(w in sql_lower for w in _SENSITIVE)
 
 
 class WBJDBCLogger:
@@ -95,7 +101,8 @@ class WBJDBCLogger:
 
         log_msg = f"Query: {query}"
         if params:
-            log_msg += f" | Params: {params}"
+            safe_params = None if _is_sensitive_sql(query) else params
+            log_msg += f" | Params: {safe_params}"
         if duration is not None:
             log_msg += f" | Duration: {duration:.4f}s"
 

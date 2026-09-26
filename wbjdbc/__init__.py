@@ -6,6 +6,7 @@ import threading
 import decimal
 import datetime
 import socket
+import warnings
 from collections import OrderedDict
 from .jvm import start_jvm
 import jaydebeapi
@@ -30,17 +31,17 @@ DEFAULT_DRIVERS = {
     "mysql": {
         "driver_class": "com.mysql.cj.jdbc.Driver",
         "default_port": 3306,
-        "jar": os.path.join(os.path.dirname(__file__), "resources", "maven", "mysql", "mysql-connector-java-8.0.26.jar"),
+        "jar": os.path.join(os.path.dirname(__file__), "resources", "maven", "mysql", "mysql-connector-j-8.0.33.jar"),
     },
     "postgresql": {
         "driver_class": "org.postgresql.Driver",
         "default_port": 5432,
-        "jar": os.path.join(os.path.dirname(__file__), "resources", "maven", "postgresql", "postgresql-42.2.24.jar"),
+        "jar": os.path.join(os.path.dirname(__file__), "resources", "maven", "postgresql", "postgresql-42.7.4.jar"),
     },
 }
 
 # Version
-__version__ = "2.0.4"
+__version__ = "2.1.0"
 version = __version__
 
 _STMT_CACHE_SIZE = 20
@@ -111,6 +112,7 @@ class _DirectCursor:
             for i, v in enumerate(params, 1):
                 _set_param(pstmt, i, v)
         t0 = time.monotonic()
+        success = True
         try:
             if _is_select(sql):
                 rs = pstmt.executeQuery()
@@ -134,8 +136,13 @@ class _DirectCursor:
                 self._rows = []
                 self._cols = []
                 self.description = None
+        except Exception:
+            success = False
+            raise
         finally:
-            elapsed_ms = (time.monotonic() - t0) * 1000
+            elapsed = time.monotonic() - t0
+            elapsed_ms = elapsed * 1000
+            get_metrics_collector().record_query(sql, elapsed, success=success)
             if elapsed_ms > self._slow_query_ms:
                 safe = None if _is_sensitive_sql(sql) else params
                 _slow_log.warning(
@@ -149,15 +156,26 @@ class _DirectCursor:
         pstmt.clearParameters()
         if self._query_timeout_sec:
             pstmt.setQueryTimeout(self._query_timeout_sec)
-        for params in params_list:
-            if isinstance(params, dict):
-                _, params = _rewrite_named(sql, params)
-            for i, v in enumerate(params, 1):
-                _set_param(pstmt, i, v)
-            pstmt.addBatch()
-        counts = pstmt.executeBatch()
-        self.rowcount = sum(int(c) for c in counts if int(c) >= 0)
-        return self.rowcount
+        t0 = time.monotonic()
+        success = True
+        try:
+            for params in params_list:
+                if isinstance(params, dict):
+                    _, params = _rewrite_named(sql, params)
+                for i, v in enumerate(params, 1):
+                    _set_param(pstmt, i, v)
+                pstmt.addBatch()
+            counts = pstmt.executeBatch()
+            self.rowcount = sum(int(c) for c in counts if int(c) >= 0)
+            return self.rowcount
+        except Exception:
+            success = False
+            raise
+        finally:
+            elapsed = time.monotonic() - t0
+            metrics = get_metrics_collector()
+            metrics.record_query(sql, elapsed, success=success)
+            metrics.record_batch_operation(len(params_list))
 
     def fetchone(self):
         if self._rows:
@@ -198,6 +216,7 @@ class _PooledConn:
         self._pool = pool
         self._created_at = time.monotonic()
         self.pool_key = pool_key
+        self._database = None
         self._stmt_cache = OrderedDict()
 
     def cursor(self):
@@ -229,15 +248,67 @@ class _PooledConn:
         cur.execute(sql, params)
         return cur.fetchdh()
 
-    def execute_batch(self, sql, params_list):
+    def execute_batch(self, sql, params_list, batch_size=None, commit_interval=None):
+        """Execute sql for each row in params_list.
+
+        With no batch_size/commit_interval, this is a single executemany() call (the
+        caller is responsible for commit()). Passing either enables chunked execution
+        with periodic auto-commit, matching wbjdbc.config's BATCH_SIZE/
+        BATCH_COMMIT_INTERVAL defaults.
+        """
+        if batch_size is None and commit_interval is None:
+            cur = self.cursor()
+            return cur.executemany(sql, params_list)
+
+        config = get_config()
+        if batch_size is None:
+            batch_size = config.get('BATCH_SIZE', 1000)
+        if commit_interval is None:
+            commit_interval = config.get('BATCH_COMMIT_INTERVAL', 5000)
+
         cur = self.cursor()
-        return cur.executemany(sql, params_list)
+        total_affected = 0
+        for i in range(0, len(params_list), batch_size):
+            batch = params_list[i:i + batch_size]
+            total_affected += cur.executemany(sql, batch)
+            if commit_interval and (i + batch_size) % commit_interval == 0:
+                self.commit()
+        self.commit()
+        return total_affected
 
     def execute_async(self, sql, params=None):
         from concurrent.futures import ThreadPoolExecutor
         if not hasattr(self, "_executor") or self._executor is None:
             self._executor = ThreadPoolExecutor(max_workers=10)
         return self._executor.submit(self.execute_query, sql, params)
+
+    def get_table_columns(self, table):
+        """Return column metadata for table (name, type, type_name, size, nullable), using the schema cache."""
+        schema_cache = get_schema_cache()
+        database = self._database or ""
+        cached = schema_cache.get_columns(database, table)
+        if cached is not None:
+            return cached
+
+        columns = []
+        try:
+            meta = self._jc.getMetaData()
+            rs = meta.getColumns(None, None, table, None)
+            while rs.next():
+                columns.append({
+                    "name": rs.getString("COLUMN_NAME"),
+                    "type": rs.getInt("DATA_TYPE"),
+                    "type_name": rs.getString("TYPE_NAME"),
+                    "size": rs.getInt("COLUMN_SIZE"),
+                    "nullable": rs.getInt("NULLABLE") == 1,
+                })
+            rs.close()
+        except Exception:
+            get_logger().error(f"Failed to get table columns for {table!r}")
+            return []
+
+        schema_cache.set_columns(database, table, columns)
+        return columns
 
     def commit(self):
         self._jc.commit()
@@ -281,10 +352,12 @@ class ConnectionPool:
         query_timeout_sec=30,
         slow_query_ms=500,
         decimal_as_float=False,
+        db_type=None,
     ):
         self._jdbc_url = jdbc_url
         self._driver_class = driver_class
         self._jars = jars
+        self._db_type = db_type
         self._user = user
         self._password = password
         self._pool_size = pool_size
@@ -307,7 +380,7 @@ class ConnectionPool:
 
         self._prewarm_done = threading.Event()
 
-        start_jvm(self._jars)
+        start_jvm(self._jars, db_type=self._db_type)
         jpype = _get_jpype()
         jpype.JClass(self._driver_class)
 
@@ -325,10 +398,16 @@ class ConnectionPool:
 
     def _new_conn(self):
         jpype = _get_jpype()
-        jconn = jpype.java.sql.DriverManager.getConnection(
-            self._jdbc_url, self._user, self._password
-        )
+        metrics = get_metrics_collector()
+        try:
+            jconn = jpype.java.sql.DriverManager.getConnection(
+                self._jdbc_url, self._user, self._password
+            )
+        except Exception:
+            metrics.record_connection(success=False)
+            raise
         jconn.setAutoCommit(False)
+        metrics.record_connection(success=True, reused=False)
         return _PooledConn(jconn, self)
 
     def _is_alive(self, pc):
@@ -339,9 +418,11 @@ class ConnectionPool:
 
     def acquire(self):
         t0 = time.monotonic()
+        metrics = get_metrics_collector()
         if not self._capacity.acquire(timeout=self._checkout_timeout):
             with self._stats_lock:
                 self._total_errors += 1
+            metrics.record_pool_checkout(success=False)
             raise TimeoutError(
                 f"ConnectionPool checkout timeout after {self._checkout_timeout}s"
             )
@@ -352,10 +433,12 @@ class ConnectionPool:
             if wait_ms > self._max_wait_ms:
                 self._max_wait_ms = wait_ms
             self._active_count += 1
+        metrics.record_pool_checkout(success=True)
         with self._lock:
             while self._idle:
                 pc = self._idle.pop()
                 if self._is_alive(pc):
+                    metrics.record_connection(success=True, reused=True)
                     return pc
                 pc._close_jconn()
         return self._new_conn()
@@ -505,13 +588,19 @@ def connect_to_db(db_type, host, database, user, password, port=None, server=Non
     :param debug: Enables debug logs in the console.
     :return: Active connection via jaydebeapi or None if it fails.
     """
+    warnings.warn(
+        "connect_to_db() is deprecated and will be removed in a future release; "
+        "use wbjdbc.connect_optimized() instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
 
     # Maps integer values to strings
     db_type_mapping = {1: "informix-sqli", 2: "mysql", 3: "postgresql"}
     db_type = db_type_mapping.get(db_type, db_type)
 
     if db_type not in DEFAULT_DRIVERS:
-        print(f"❌ Database '{db_type}' not supported.")
+        print(f"[ERROR] Database '{db_type}' not supported.")
         return None
 
     driver_config = DEFAULT_DRIVERS[db_type]
@@ -520,36 +609,36 @@ def connect_to_db(db_type, host, database, user, password, port=None, server=Non
     port = port or driver_config["default_port"]
 
     if debug:
-        print(f"\n🔍 DB Type: {db_type}, Host: {host}, Database: {database}, Port: {port}")
+        print(f"\n[INFO] DB Type: {db_type}, Host: {host}, Database: {database}, Port: {port}")
 
-    # 🔹 Adjusting the JDBC URL for Informix
+    # Adjusting the JDBC URL for Informix
     if db_type == "informix-sqli":
         if not server:
-            print("❌ For Informix-SQLI, the `server` parameter is required.")
+            print("[ERROR] For Informix-SQLI, the `server` parameter is required.")
             return None
         jdbc_url = f"jdbc:informix-sqli://{host}:{port}/{database}:INFORMIXSERVER={server}"
     else:
         jdbc_url = f"jdbc:{db_type}://{host}:{port}/{database}"
 
     if debug:
-        print(f"🔹 Generated JDBC URL: {jdbc_url}")
+        print(f"[INFO] Generated JDBC URL: {jdbc_url}")
 
-    # 🔹 Initializing the JVM
+    # Initializing the JVM
     jars = [jar_path] + (extra_jars if extra_jars else [])
 
     if debug:
-        print("\n🟢 Starting the JVM...\n")
+        print("\n[INFO] Starting the JVM...\n")
 
-    start_jvm(jars, java_home=java_home, debug=debug)
+    start_jvm(jars, java_home=java_home, debug=debug, db_type=db_type)
 
-    # 🔹 Attempting to connect to the database
+    # Attempting to connect to the database
     try:
         conn = jaydebeapi.connect(driver_class, jdbc_url, [user, password], jars)
         if debug:
-            print(f"✅ Successfully connected to {db_type.upper()}!")
+            print(f"[OK] Successfully connected to {db_type.upper()}!")
         return JDBCConnection(conn)  # <-- CORRECT: Returns a JDBCConnection
     except jaydebeapi.DatabaseError as e:
-        print(f"❌ Error connecting to the database: {e}")
+        print(f"[ERROR] Error connecting to the database: {e}")
         return None
 
 
@@ -643,17 +732,20 @@ def connect_optimized(
                     query_timeout_sec=query_timeout_sec,
                     slow_query_ms=slow_query_ms,
                     decimal_as_float=decimal_as_float,
+                    db_type=db_type,
                 )
             pool = _pools[pool_key]
         conn = pool.acquire()
         conn.pool_key = pool_key
     else:
-        start_jvm([jar])
+        start_jvm([jar], db_type=db_type)
         jpype = _get_jpype()
         jpype.JClass(driver_class)
         jconn = jpype.java.sql.DriverManager.getConnection(jdbc_url, user, password)
         jconn.setAutoCommit(False)
         conn = _PooledConn(jconn, None)
+
+    conn._database = database
 
     if isolation_level in ("DIRTY_READ", "READ_UNCOMMITTED") and db_type == "informix-sqli":
         try:

@@ -8,6 +8,7 @@ Totalmente compatível com versões anteriores (v1.x) e pronta para produção.
 
 ## 🚀 Principais Recursos
 
+- 🗄️ **Multi-Banco** — Informix, MySQL e PostgreSQL com os drivers JDBC já embutidos.
 - 🔄 **Pool de Conexões** — Gerencia múltiplas conexões com reaproveitamento automático.  
 - ⚡ **Execução em Lote** — Até 10x mais rápido em inserções/atualizações massivas.  
 - 🧵 **Execução Assíncrona** — Suporte a dezenas de queries simultâneas.  
@@ -41,9 +42,23 @@ conn = connect_optimized(
     server="informix"
 )
 
-df = conn.query("SELECT * FROM clientes LIMIT 10")
-print(df)
+cursor = conn.cursor()
+cursor.execute("SELECT * FROM clientes LIMIT 10")
+rows = cursor.fetchdh()          # lista de dicts (coluna -> valor)
+print(rows)
+
+# Ou, direto no objeto de conexão:
+rows = conn.execute_query("SELECT * FROM clientes LIMIT 10")
+
+# Se preferir pandas:
+cursor.execute("SELECT * FROM clientes LIMIT 10")
+df = cursor.fetchdf()
 ```
+
+> `connect_optimized()` é a API única recomendada — usa internamente `_DirectCursor`
+> (JPype direto, sem o lock global do jaydebeapi), pool com pre-warm/statement cache e
+> cache de schema. `connect_to_db()` e `OptimizedJDBCConnection` continuam funcionando
+> (agora delegando para o mesmo núcleo), mas emitem `DeprecationWarning`.
 
 ---
 
@@ -69,7 +84,8 @@ print(future.result())
 
 - Tempo médio, p50, p95 e p99 de queries  
 - Estatísticas de pool, cache e conexões  
-- Exportação JSON para Prometheus ou Grafana  
+- Exportação em JSON (`get_metrics_collector().export_metrics(...)`) — hoje é
+  JSON puro; um endpoint Prometheus nativo ainda está no roadmap.
 
 ---
 
@@ -113,6 +129,7 @@ Fully production-ready and **100% backward compatible** with v1.x.
 
 ## 🚀 Main Features
 
+- 🗄️ **Multi-Database** — Informix, MySQL and PostgreSQL, with JDBC drivers bundled in.
 - 🔄 **Connection Pooling** — Efficient, thread-safe connection reuse  
 - ⚡ **Batch Execution** — 5–10x faster inserts/updates  
 - 🧵 **Async Query Execution** — 50–100 concurrent queries supported  
@@ -146,9 +163,24 @@ conn = connect_optimized(
     server="informix"
 )
 
-df = conn.query("SELECT * FROM customers LIMIT 10")
-print(df)
+cursor = conn.cursor()
+cursor.execute("SELECT * FROM customers LIMIT 10")
+rows = cursor.fetchdh()          # list of dicts (column -> value)
+print(rows)
+
+# Or directly on the connection object:
+rows = conn.execute_query("SELECT * FROM customers LIMIT 10")
+
+# If you prefer pandas:
+cursor.execute("SELECT * FROM customers LIMIT 10")
+df = cursor.fetchdf()
 ```
+
+> `connect_optimized()` is the single recommended API — it uses `_DirectCursor`
+> internally (JPype-direct, bypassing jaydebeapi's global lock), a pool with
+> pre-warming/statement caching, and schema caching. `connect_to_db()` and
+> `OptimizedJDBCConnection` still work (now delegating to the same core), but raise a
+> `DeprecationWarning`.
 
 ---
 
@@ -174,7 +206,8 @@ print(future.result())
 
 - Query latency (avg, p50, p95, p99)  
 - Pool and cache statistics  
-- JSON export for Prometheus/Grafana  
+- JSON export (`get_metrics_collector().export_metrics(...)`) — a native Prometheus
+  endpoint is on the roadmap, not implemented yet.  
 
 ---
 

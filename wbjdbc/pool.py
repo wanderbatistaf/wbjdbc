@@ -1,8 +1,12 @@
 """
-Connection pooling for wbjdbc.
+Legacy connection pooling for wbjdbc (deprecated as of 2.1).
 
-Implements a thread-safe connection pool to reuse JDBC connections
-and reduce overhead.
+This pool (queue-based, jaydebeapi cursors via wbjdbc.optimized.OptimizedJDBCConnection)
+is no longer used internally by wbjdbc: OptimizedJDBCConnection now delegates to the
+JPype-direct core used by connect_optimized() (see wbjdbc/__init__.py's ConnectionPool
+/ _PooledConn / _DirectCursor), which has statement caching and pre-warming that this
+module does not. Kept only so `from wbjdbc.pool import ...` / `from wbjdbc import
+get_pool, close_all_pools` keep working for existing callers.
 """
 
 import time

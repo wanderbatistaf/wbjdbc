@@ -69,14 +69,15 @@ def install_dependencies():
 
 setup(
     name="wbjdbc",
-    version="2.0.4",
+    version="2.1.0",
     packages=find_packages(),
     include_package_data=True,
     package_data={
         "wbjdbc": [
-            "resources/server/**",
             "resources/maven/com.ibm.informix/*",
             "resources/maven/org.mongodb/*",
+            "resources/maven/mysql/*",
+            "resources/maven/postgresql/*",
             "resources/dependencies/*",
         ]
     },
@@ -84,7 +85,7 @@ setup(
         "jaydebeapi",
         "JPype1>=1.3.0"
     ],
-    description="Optimized Python-Java JDBC bridge with connection pooling, batch execution, async queries, and caching for Informix and MongoDB",
+    description="Optimized Python-Java JDBC bridge with connection pooling, batch execution, async queries, and caching for Informix, MySQL and PostgreSQL",
     long_description=long_description,
     long_description_content_type="text/markdown",
     author="Wanderson Batista",

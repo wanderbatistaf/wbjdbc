@@ -187,14 +187,24 @@ WBJDBC_POOL_PRE_PING=true    # Test before use
 **Pool Statistics:**
 
 ```python
-from wbjdbc import get_pool
+from wbjdbc import connect_optimized_stats
 
-pool = get_pool(...)
-stats = pool.get_stats()
-print(f"Pool size: {stats['current_size']}")
-print(f"Available: {stats['available']}")
-print(f"In use: {stats['in_use']}")
+# key is "{db_type}:{host}:{port}:{database}:{user}" - the same value connect_optimized()
+# builds internally; it's stamped on the connection as conn.pool_key
+conn = connect_optimized(db_type="informix-sqli", host="server", database="db",
+                          user="user", password="pass", server="informix")
+stats = connect_optimized_stats(conn.pool_key)
+print(f"Pool size: {stats['size']}")
+print(f"Idle: {stats['idle']}")
+print(f"Active: {stats['active']}")
+print(f"Avg wait: {stats['avg_wait_ms']}ms")
 ```
+
+> Note: `get_pool()`/`wbjdbc.pool.ConnectionPool` (queue-based, jaydebeapi cursors) is a
+> **legacy, deprecated** pool kept only for backward compatibility - it is no longer
+> used internally. `connect_optimized()` uses its own JPype-direct pool (statement
+> cache + pre-warming + pre-ping), whose stats are read via `connect_optimized_stats()`
+> above.
 
 ---
 
@@ -753,7 +763,7 @@ conn.execute_async(...)
 
 ### connect_optimized()
 
-Create an optimized JDBC connection.
+Create an optimized JDBC connection. This is the single recommended entry point.
 
 ```python
 connect_optimized(
@@ -765,12 +775,21 @@ connect_optimized(
     port: int = None,
     server: str = None,
     use_pool: bool = True,
-    enable_type_mapping: bool = True,
     isolation_level: str = None,
     config_file: str = None,
+    query_timeout_sec: int = 30,
+    slow_query_ms: int = 500,
+    decimal_as_float: bool = False,
+    pool_size: int = 5,
+    max_overflow: int = 10,
+    checkout_timeout: int = 30,
     **kwargs
-) -> OptimizedJDBCConnection
+) -> _PooledConn
 ```
+
+Returns a `_PooledConn` (pool-aware connection wrapping `_DirectCursor` - JPype-direct,
+statement-cached, schema-cached). `db_type` accepts `"informix-sqli"`, `"mysql"`,
+`"postgresql"`, or the legacy integers `1`/`2`/`3`.
 
 **Parameters:**
 - `db_type`: "informix-sqli", "mysql", "postgresql", or 1-3
@@ -786,9 +805,12 @@ connect_optimized(
 - `config_file`: Path to .env file
 - `**kwargs`: Additional options
 
-### OptimizedJDBCConnection
+### OptimizedJDBCConnection *(deprecated)*
 
-Enhanced connection class.
+> **Deprecated** since 2.1: `connect_optimized()` returns a `_PooledConn` directly,
+> not an `OptimizedJDBCConnection`. This class is kept only for backward compatibility
+> - it now delegates to the same `_PooledConn` core internally and raises a
+> `DeprecationWarning` on construction. New code should just use `connect_optimized()`.
 
 **Methods:**
 
@@ -808,9 +830,10 @@ with connect_optimized(...) as conn:
     # auto-commits on success, auto-closes
 ```
 
-### OptimizedJDBCCursor
+### OptimizedJDBCCursor *(deprecated)*
 
-Enhanced cursor class.
+> **Deprecated** since 2.1 - kept for backward compatibility; wraps a `_DirectCursor`.
+> `connect_optimized(...).cursor()` returns a `_DirectCursor` directly.
 
 **Methods:**
 

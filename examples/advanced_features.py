@@ -42,7 +42,7 @@ def example_batch_insert():
 
     duration = time.time() - start_time
 
-    print(f"✅ Inserted {rows_affected} rows in {duration:.2f} seconds")
+    print(f"[OK] Inserted {rows_affected} rows in {duration:.2f} seconds")
     print(f"   ({rows_affected/duration:.0f} rows/second)\n")
 
     conn.close()
@@ -77,7 +77,7 @@ def example_batch_update():
 
     duration = time.time() - start_time
 
-    print(f"✅ Updated {rows_affected} rows in {duration:.2f} seconds\n")
+    print(f"[OK] Updated {rows_affected} rows in {duration:.2f} seconds\n")
 
     conn.close()
 
@@ -120,7 +120,7 @@ def example_async_queries():
 
     duration = time.time() - start_time
 
-    print(f"\n✅ Completed {len(queries)} queries in {duration:.2f} seconds\n")
+    print(f"\n[OK] Completed {len(queries)} queries in {duration:.2f} seconds\n")
 
     conn.close()
 
@@ -165,11 +165,11 @@ def example_async_concurrent():
             completed += 1
             print(f"  [{completed}/{len(futures)}] {table_name}: {len(result)} rows")
         except Exception as e:
-            print(f"  ❌ {table_name} failed: {e}")
+            print(f"  [ERROR] {table_name} failed: {e}")
 
     duration = time.time() - start_time
 
-    print(f"\n✅ Processed all tables in {duration:.2f} seconds\n")
+    print(f"\n[OK] Processed all tables in {duration:.2f} seconds\n")
 
     conn.close()
 
@@ -204,7 +204,7 @@ def example_metadata_caching():
     print(f"  Retrieved {len(columns)} columns in {duration2*1000:.2f}ms")
 
     speedup = duration1 / duration2 if duration2 > 0 else float('inf')
-    print(f"\n✅ Cache is {speedup:.1f}x faster!\n")
+    print(f"\n[OK] Cache is {speedup:.1f}x faster!\n")
 
     conn.close()
 
@@ -262,7 +262,7 @@ def example_metrics_collection():
 
     # Export metrics to file
     json_metrics = metrics.export_metrics('wbjdbc_metrics.json')
-    print(f"\n✅ Metrics exported to wbjdbc_metrics.json\n")
+    print(f"\n[OK] Metrics exported to wbjdbc_metrics.json\n")
 
     conn.close()
 
@@ -300,7 +300,7 @@ def example_dirty_reads_informix():
     """)
     duration = time.time() - start_time
 
-    print(f"✅ Query completed in {duration:.2f} seconds")
+    print(f"[OK] Query completed in {duration:.2f} seconds")
     print(f"   Retrieved {len(results)} customers")
     print(f"   Top customer revenue: ${results[0]['total_revenue']:.2f}\n")
 
@@ -329,7 +329,7 @@ if __name__ == "__main__":
         try:
             example_func()
         except Exception as e:
-            print(f"❌ {name} example failed: {e}\n")
+            print(f"[ERROR] {name} example failed: {e}\n")
 
     print("=" * 60)
     print("All examples completed!")

@@ -29,7 +29,7 @@ def example_basic_connection():
         print(row)
 
     conn.close()
-    print("\n✅ Connection closed\n")
+    print("\n[OK] Connection closed\n")
 
 
 def example_context_manager():
@@ -52,7 +52,7 @@ def example_context_manager():
         # Changes are automatically committed on success
         # or rolled back on exception
 
-    print("✅ Connection auto-closed\n")
+    print("[OK] Connection auto-closed\n")
 
 
 def example_cursor_operations():
@@ -84,7 +84,7 @@ def example_cursor_operations():
 
     cursor.close()
     conn.close()
-    print("\n✅ Done\n")
+    print("\n[OK] Done\n")
 
 
 def example_dict_results():
@@ -111,7 +111,7 @@ def example_dict_results():
 
     cursor.close()
     conn.close()
-    print("\n✅ Done\n")
+    print("\n[OK] Done\n")
 
 
 def example_type_mapping():
@@ -153,7 +153,7 @@ def example_type_mapping():
 
     cursor.close()
     conn.close()
-    print("\n✅ Done\n")
+    print("\n[OK] Done\n")
 
 
 if __name__ == "__main__":
@@ -167,24 +167,24 @@ if __name__ == "__main__":
     try:
         example_basic_connection()
     except Exception as e:
-        print(f"❌ Example failed: {e}\n")
+        print(f"[ERROR] Example failed: {e}\n")
 
     try:
         example_context_manager()
     except Exception as e:
-        print(f"❌ Example failed: {e}\n")
+        print(f"[ERROR] Example failed: {e}\n")
 
     try:
         example_cursor_operations()
     except Exception as e:
-        print(f"❌ Example failed: {e}\n")
+        print(f"[ERROR] Example failed: {e}\n")
 
     try:
         example_dict_results()
     except Exception as e:
-        print(f"❌ Example failed: {e}\n")
+        print(f"[ERROR] Example failed: {e}\n")
 
     try:
         example_type_mapping()
     except Exception as e:
-        print(f"❌ Example failed: {e}\n")
+        print(f"[ERROR] Example failed: {e}\n")

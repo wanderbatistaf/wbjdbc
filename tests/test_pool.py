@@ -229,6 +229,97 @@ class TestPoolCapacity:
         assert pool.stats()["active"] == 0
 
 
+class TestGetTableColumns:
+    def _rs_for_columns(self, rows):
+        rs = MagicMock()
+        row_iter = iter(rows)
+        current = [None]
+
+        def _next():
+            try:
+                current[0] = next(row_iter)
+                return True
+            except StopIteration:
+                return False
+
+        rs.next.side_effect = _next
+        rs.getString.side_effect = lambda col: current[0][col]
+        rs.getInt.side_effect = lambda col: current[0][col]
+        return rs
+
+    def test_returns_columns_and_caches(self):
+        from wbjdbc.cache import reset_cache
+
+        reset_cache()
+        pool = _build_pool(pool_size=1)
+        conn = pool.acquire()
+        conn._database = "testdb"
+
+        rows = [
+            {"COLUMN_NAME": "id", "DATA_TYPE": 4, "TYPE_NAME": "INTEGER", "COLUMN_SIZE": 10, "NULLABLE": 0},
+        ]
+        rs = self._rs_for_columns(rows)
+        meta = MagicMock()
+        meta.getColumns.return_value = rs
+        conn._jc.getMetaData.return_value = meta
+
+        columns = conn.get_table_columns("users")
+
+        assert columns == [
+            {"name": "id", "type": 4, "type_name": "INTEGER", "size": 10, "nullable": False}
+        ]
+        assert conn._jc.getMetaData.call_count == 1
+
+        # Second call should be served from the schema cache, not the JDBC metadata API.
+        columns_again = conn.get_table_columns("users")
+        assert columns_again == columns
+        assert conn._jc.getMetaData.call_count == 1
+
+    def test_returns_empty_list_on_error(self):
+        from wbjdbc.cache import reset_cache
+
+        reset_cache()
+        pool = _build_pool(pool_size=1)
+        conn = pool.acquire()
+        conn._database = "testdb2"
+        conn._jc.getMetaData.side_effect = Exception("boom")
+
+        assert conn.get_table_columns("orders") == []
+
+
+class TestExecuteBatchChunking:
+    def test_no_batch_size_is_single_executemany_no_commit(self):
+        pool = _build_pool(pool_size=1)
+        pool._mock_jconn.isValid.return_value = True
+        conn = pool.acquire()
+
+        with patch.object(conn._jc, "prepareStatement") as prep:
+            pstmt = MagicMock()
+            pstmt.executeBatch.return_value = [1, 1]
+            prep.return_value = pstmt
+
+            conn.execute_batch("INSERT INTO t VALUES (?)", [(1,), (2,)])
+
+        pool._mock_jconn.commit.assert_not_called()
+
+    def test_batch_size_chunks_and_commits(self):
+        pool = _build_pool(pool_size=1)
+        pool._mock_jconn.isValid.return_value = True
+        conn = pool.acquire()
+
+        with patch.object(conn._jc, "prepareStatement") as prep:
+            pstmt = MagicMock()
+            pstmt.executeBatch.return_value = [1]
+            prep.return_value = pstmt
+
+            total = conn.execute_batch(
+                "INSERT INTO t VALUES (?)", [(1,), (2,), (3,)], batch_size=1, commit_interval=1
+            )
+
+        assert total == 3
+        assert pool._mock_jconn.commit.call_count >= 3
+
+
 class TestPoolClose:
     def test_close_empties_idle(self):
         pool = _build_pool(pool_size=2)

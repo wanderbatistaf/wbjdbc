@@ -581,7 +581,41 @@ The library is ready for immediate production deployment.
 
 ---
 
+## 🔧 Addendum: Core Unification (v2.1)
+
+Everything above describes the original Nov/2025 design, where `connect_optimized()`
+returned an `OptimizedJDBCConnection` backed by `wbjdbc/pool.py`'s queue-based pool and
+plain jaydebeapi cursors. As of v2.1, `connect_optimized()` is backed by a faster core
+directly inside `wbjdbc/__init__.py` instead - `_DirectCursor` (talks to JDBC via
+JPype directly, bypassing jaydebeapi's global lock), `_PooledConn`, and a
+semaphore-based `ConnectionPool` with statement caching and background pre-warming.
+
+**What v2.1 does:**
+- `_PooledConn` (the real return value of `connect_optimized()`) gained
+  `get_table_columns()` with schema caching, and now records real metrics
+  (`MetricsCollector`) on every query/batch/connection/checkout.
+- `OptimizedJDBCConnection`/`OptimizedJDBCCursor` are now thin, deprecated wrappers
+  that delegate to `_PooledConn`/`_DirectCursor` - same public API, same imports keep
+  working, but a `DeprecationWarning` points callers at `connect_optimized()` directly.
+  Same treatment for `connect_to_db()`.
+- `wbjdbc/pool.py` (the original queue-based pool) and `wbjdbc/types.py`
+  (`TypeMapper`) are kept importable but are no longer used internally - marked
+  legacy in their docstrings.
+- Packaging: removed an 81MB embedded JDK that wasn't needed at runtime (`jvm.py`
+  resolves Java via `JAVA_HOME`/system PATH), shrinking the package from ~86MB to
+  ~5MB. Added MySQL/PostgreSQL JDBC driver jars, enabling those `db_type`s out of the
+  box. `start_jvm()` now only loads the Informix+BSON jars for Informix connections.
+- `Config._load_env_file()` now keeps `.env` values in an instance-local override
+  instead of the process environment; `_rewrite_named()` correctly handles
+  Postgres-style `::type` casts; `WBJDBCLogger.log_query()` redacts sensitive
+  params, matching the slow-query logger.
+
+See `ARCHITECTURE.md` for the current (single) architecture diagram and `CHANGELOG.md`
+for the itemized list.
+
+---
+
 **Developed for:** WBJDBC Optimization Project
-**Version:** 2.0.0
+**Version:** 2.0.0 (original) / 2.1.0 (core unification addendum)
 **Status:** ✅ Complete
-**Date:** November 2, 2025
+**Date:** November 2, 2025 (original) / see CHANGELOG.md for the unification date
