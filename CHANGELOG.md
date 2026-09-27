@@ -17,6 +17,12 @@ All notable changes to wbjdbc are documented here.
 - **Savepoints** - `conn.savepoint()`, `conn.rollback_to()`, `conn.release_savepoint()`,
   and a `conn.savepoint_scope()` context manager for partial rollback within a
   transaction.
+- **`get_procedure_source(proc_name)`** - retrieves the `CREATE PROCEDURE`/`FUNCTION`
+  source text of an existing stored procedure/function, or `None` if it doesn't
+  exist. Works across `informix-sqli` (`sysprocbody`/`sysprocedures`), `mysql`
+  (`SHOW CREATE PROCEDURE`) and `postgresql` (`pg_get_functiondef`), cached via the
+  same schema cache as `get_table_columns()`. Useful for data-catalog/lineage tooling
+  that needs the actual procedure body, not just its signature.
 - `examples/production_features.py` - new example file covering retry/SSL,
   exceptions, real async, Prometheus, stored procedures, LOB streaming and
   savepoints (the existing `basic_usage.py`/`advanced_features.py` were already

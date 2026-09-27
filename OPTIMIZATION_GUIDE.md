@@ -17,6 +17,7 @@
   - [Exceptions (DB-API 2.0)](#exceptions-db-api-20)
   - [Real Async Support](#real-async-support)
   - [Stored Procedures](#stored-procedures)
+  - [Stored Procedure Source (DDL)](#stored-procedure-source-ddl)
   - [LOB (BLOB/CLOB) Handling](#lob-blobclob-handling)
   - [Savepoints](#savepoints)
   - [Metrics & Logging](#metrics--logging)
@@ -668,6 +669,35 @@ available and mirrors `execute_query()`/`execute_batch()`.
 - Unlike `execute()`, the `CallableStatement` is **not** cached (a fresh one is
   prepared and closed per call) - procedure calls aren't the statement-cache's hot
   path, and this keeps OUT parameter registration simple and correct.
+
+---
+
+### Stored Procedure Source (DDL)
+
+`conn.get_procedure_source(proc_name)` returns the `CREATE PROCEDURE`/`FUNCTION`
+source text for an existing stored procedure/function, or `None` if it doesn't exist -
+useful for data-catalog/lineage tooling that needs the actual procedure body, not just
+its signature (`callproc()` above only calls it).
+
+```python
+source = conn.get_procedure_source("calc_customer_total")
+if source:
+    print(source)  # the full CREATE PROCEDURE/FUNCTION text
+```
+
+Works across all three dialects, each backed by a different source:
+- **informix-sqli**: `sysprocbody`/`sysprocedures` - the source is stored pre-chopped
+  into fixed-width rows, read directly off the JDBC `ResultSet` (bypassing the normal
+  type-conversion path, which would otherwise strip whitespace at row boundaries) and
+  reassembled in order.
+- **mysql**: `SHOW CREATE PROCEDURE proc_name`.
+- **postgresql**: `pg_get_functiondef(oid)` via `pg_proc` (covers both functions and
+  procedures since PG11). If multiple overloads share the name, only one (arbitrary)
+  definition is returned - `pg_proc` doesn't key by name alone.
+
+`proc_name` is validated as a plain identifier before use (raises `ValueError`
+otherwise), the result is cached in the same schema cache `get_table_columns()` uses,
+and an unsupported `db_type` raises `NotSupportedError` rather than returning `None`.
 
 ---
 
