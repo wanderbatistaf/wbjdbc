@@ -2,6 +2,32 @@
 
 All notable changes to wbjdbc are documented here.
 
+## [2.3.0] - 2026-09-18
+
+### Added
+
+- **Stored procedures** - `cursor.callproc(proc_name, params=None, out_types=None)`
+  (and `conn.callproc(...)`) call a stored procedure via JDBC's `CallableStatement`,
+  supporting IN/OUT/INOUT parameters and result sets (fetched afterwards like a
+  normal SELECT).
+- **LOB streaming** - `execute(..., stream_lobs=True)` returns `LobHandle` objects for
+  BLOB/CLOB columns instead of materializing them, with `.read()`/`.stream(chunk_size)`
+  for chunked reads. Valid to read any time before the connection's next
+  commit/rollback, per the JDBC `Blob`/`Clob` spec.
+- **Savepoints** - `conn.savepoint()`, `conn.rollback_to()`, `conn.release_savepoint()`,
+  and a `conn.savepoint_scope()` context manager for partial rollback within a
+  transaction.
+- `examples/production_features.py` - new example file covering retry/SSL,
+  exceptions, real async, Prometheus, stored procedures, LOB streaming and
+  savepoints (the existing `basic_usage.py`/`advanced_features.py` were already
+  accurate and didn't need changes).
+
+### Improved
+
+- `_j2p()` (`wbjdbc/_types.py`) now detects BLOB/CLOB columns via `isinstance` against
+  the JDBC `Blob`/`Clob` interfaces (driver-independent, unlike classname-based
+  dispatch) and materializes them to `bytes`/`str` by default.
+
 ## [2.2.0] - 2026-09-18
 
 ### Added

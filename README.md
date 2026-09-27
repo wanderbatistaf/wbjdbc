@@ -1,5 +1,5 @@
 [![PyPI](https://img.shields.io/pypi/v/wbjdbc)](https://pypi.org/project/wbjdbc/) [![PyPI - Downloads](https://img.shields.io/pypi/dm/wbjdbc)](https://pypi.org/project/wbjdbc/) [![Build Status](https://github.com/wanderbatistaf/wbjdbc/actions/workflows/publish-package.yml/badge.svg)](https://github.com/wanderbatistaf/wbjdbc/actions) ![License: MIT](https://img.shields.io/github/license/wanderbatistaf/wbjdbc) [![Último Commit](https://img.shields.io/github/last-commit/wanderbatistaf/wbjdbc)](https://github.com/wanderbatistaf/wbjdbc) [![GitHub issues](https://img.shields.io/github/issues/wanderbatistaf/wbjdbc)](https://github.com/wanderbatistaf/wbjdbc/issues) [![GitHub forks](https://img.shields.io/github/forks/wanderbatistaf/wbjdbc?style=social)](https://github.com/wanderbatistaf/wbjdbc) [![GitHub stars](https://img.shields.io/github/stars/wanderbatistaf/wbjdbc?style=social)](https://github.com/wanderbatistaf/wbjdbc) 
-# 🧩 wbjdbc v2.2 — JDBC para Python (com suporte a Informix, Pooling, Async e Cache)
+# 🧩 wbjdbc v2.3 — JDBC para Python (com suporte a Informix, Pooling, Async e Cache)
 
 wbjdbc é uma biblioteca JDBC moderna e otimizada para Python, agora com recursos de **pool de conexões**, **execução assíncrona**, **operações em lote**, **cache de metadados** e **mapeamento de tipos**.  
 Totalmente compatível com versões anteriores (v1.x) e pronta para produção.
@@ -25,6 +25,10 @@ Totalmente compatível com versões anteriores (v1.x) e pronta para produção.
 ```bash
 pip install wbjdbc
 ```
+
+Também precisa de uma JVM no `PATH`/`JAVA_HOME` — o wbjdbc conversa com
+Informix/MySQL/Postgres via driver JDBC de verdade, não é REST API disfarçada. Sem
+JVM, sem conexão - mas pelo menos ele avisa em vez de te deixar adivinhando.
 
 ---
 
@@ -204,7 +208,7 @@ MIT © 2025 Wander Freitas Batista
 
 ---
 
-# 🇺🇸 wbjdbc v2.2 — JDBC for Python (Informix, Pooling, Async, Caching)
+# 🇺🇸 wbjdbc v2.3 — JDBC for Python (Informix, Pooling, Async, Caching)
 
 **wbjdbc** is a modern, optimized JDBC library for Python featuring **connection pooling**, **async queries**, **batch execution**, **metadata caching**, and **type mapping**.  
 Fully production-ready and **100% backward compatible** with v1.x.
@@ -230,6 +234,10 @@ Fully production-ready and **100% backward compatible** with v1.x.
 ```bash
 pip install wbjdbc
 ```
+
+You'll also need a JVM on `PATH`/`JAVA_HOME` — wbjdbc talks to Informix/MySQL/Postgres
+through real JDBC drivers, not a REST API in disguise. No JVM, no connection - but at
+least it'll say so instead of leaving you to guess.
 
 ---
 
