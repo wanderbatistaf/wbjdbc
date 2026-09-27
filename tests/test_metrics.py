@@ -233,6 +233,68 @@ def test_success_rate():
     assert stats['queries']['success_rate'] == pytest.approx(0.8, rel=0.01)
 
 
+def test_export_prometheus_format():
+    """Test Prometheus text exposition format output."""
+    metrics = MetricsCollector()
+
+    metrics.record_query("SELECT 1", 0.1, success=True)
+    metrics.record_query("SELECT 2", 0.2, success=False)
+    metrics.record_connection(success=True, reused=False)
+    metrics.record_connection(success=True, reused=True)
+    metrics.record_cache_hit()
+    metrics.record_cache_miss()
+    metrics.record_pool_checkout(success=True)
+    metrics.record_batch_operation(10)
+    metrics.record_reconnect()
+
+    output = metrics.export_prometheus()
+
+    assert "# TYPE wbjdbc_query_duration_seconds summary" in output
+    assert 'wbjdbc_query_duration_seconds{quantile="0.5"}' in output
+    assert "wbjdbc_queries_total 1" in output
+    assert "wbjdbc_queries_failed_total 1" in output
+    assert "wbjdbc_connections_created_total 1" in output
+    assert "wbjdbc_connections_reused_total 1" in output
+    assert "wbjdbc_cache_hits_total 1" in output
+    assert "wbjdbc_cache_misses_total 1" in output
+    assert "wbjdbc_batch_operations_total 1" in output
+    assert "wbjdbc_reconnects_total 1" in output
+
+
+def test_export_prometheus_on_empty_metrics_does_not_crash():
+    metrics = MetricsCollector()
+    output = metrics.export_prometheus()
+    assert "wbjdbc_queries_total 0" in output
+
+
+def test_export_metrics_uses_json_by_default(tmp_path):
+    from wbjdbc.config import reset_config
+
+    reset_config()
+    metrics = MetricsCollector()
+    metrics.record_query("SELECT 1", 0.1, success=True)
+
+    output = metrics.export_metrics()
+
+    assert output.strip().startswith("{")
+
+
+def test_export_metrics_uses_prometheus_when_configured():
+    from wbjdbc.config import get_config, reset_config
+
+    reset_config()
+    config = get_config()
+    config.set('METRICS_PROMETHEUS', True)
+
+    metrics = MetricsCollector()
+    metrics.record_query("SELECT 1", 0.1, success=True)
+
+    output = metrics.export_metrics()
+
+    assert output.startswith("# HELP")
+    reset_config()
+
+
 def test_percentile_calculation():
     """Test percentile calculations."""
     metrics = MetricsCollector()

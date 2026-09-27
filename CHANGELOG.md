@@ -2,6 +2,39 @@
 
 All notable changes to wbjdbc are documented here.
 
+## [2.2.0] - 2026-09-18
+
+### Added
+
+- **Retry/reconnect with backoff** on connection establishment (`connect_optimized()`
+  new `max_retries`/`retry_delay` kwargs, default from `WBJDBC_MAX_RETRIES`/
+  `WBJDBC_RETRY_DELAY`). Only retries the connect step, never a query already sent to
+  the server. Successful reconnects increment the `reconnects` metric.
+- **SSL/TLS** support on the JDBC URL (`connect_optimized()` new `ssl_enabled`/
+  `ssl_verify` kwargs, default from `WBJDBC_SSL_ENABLED`/`WBJDBC_SSL_VERIFY`), with
+  per-`db_type` property mapping for MySQL/PostgreSQL/Informix - see
+  `OPTIMIZATION_GUIDE.md` for the exact properties and a note on Informix
+  driver-version differences.
+- **DB-API 2.0 exception hierarchy** (`wbjdbc/exceptions.py`) - `Error`,
+  `InterfaceError`, `DatabaseError`, `DataError`, `OperationalError`,
+  `IntegrityError`, `InternalError`, `ProgrammingError`, `NotSupportedError`, all
+  exported from the top-level `wbjdbc` package. Java `SQLException`s raised by
+  `_DirectCursor.execute()`/`executemany()` and by connection establishment are now
+  translated into these (classified by SQLSTATE class, so this works the same
+  regardless of `db_type`), each carrying `.sqlstate`/`.sqlcode`. The deprecated
+  `connect_to_db()`/`optimized.py` legacy paths are unchanged (jaydebeapi already
+  raises its own `DatabaseError`).
+- **Real async support** - `wbjdbc/aio.py` rewritten. Previously `async_db_conn` only
+  wrapped `connect`/`commit`/`rollback`/`close` in `asyncio.to_thread`; every
+  `cursor().execute()`/`fetchall()`/etc. inside the `async with` block ran
+  synchronously and blocked the event loop. New `AsyncConnection`/`AsyncCursor` wrap
+  the existing `_PooledConn`/`_DirectCursor` core (no JDBC logic duplicated) so every
+  JDBC-hitting call is a real coroutine.
+- **Prometheus export** - `MetricsCollector.export_prometheus()` formats the existing
+  `get_metrics()` output (queries, connections, pool, cache, p50/p95/p99) as
+  Prometheus text exposition format, no new dependency required. `export_metrics()`
+  writes this format when `WBJDBC_METRICS_PROMETHEUS=true`.
+
 ## [2.1.0] - 2026-09-18
 
 ### Core unification

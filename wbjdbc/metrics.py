@@ -234,34 +234,99 @@ class MetricsCollector:
                 }
             return stats
 
+    def export_prometheus(self) -> str:
+        """
+        Format current metrics as Prometheus text exposition format.
+
+        Returns a plain string - this does not start an HTTP server. Wire it into
+        your own web framework, e.g. in Flask:
+
+            @app.route("/metrics")
+            def metrics():
+                return get_metrics_collector().export_prometheus(), 200, \\
+                    {"Content-Type": "text/plain; version=0.0.4"}
+        """
+        m = self.get_metrics()
+        lines = []
+
+        def counter(name, help_text, value):
+            lines.append(f"# HELP {name} {help_text}")
+            lines.append(f"# TYPE {name} counter")
+            lines.append(f"{name} {value}")
+
+        def gauge(name, help_text, value):
+            lines.append(f"# HELP {name} {help_text}")
+            lines.append(f"# TYPE {name} gauge")
+            lines.append(f"{name} {value}")
+
+        gauge("wbjdbc_uptime_seconds", "Time since the metrics collector started", m['uptime_seconds'])
+
+        q = m['queries']
+        query_sum = q['average_time'] * q['total']
+        lines.append("# HELP wbjdbc_query_duration_seconds Query execution time")
+        lines.append("# TYPE wbjdbc_query_duration_seconds summary")
+        lines.append(f'wbjdbc_query_duration_seconds{{quantile="0.5"}} {q["p50_time"]}')
+        lines.append(f'wbjdbc_query_duration_seconds{{quantile="0.95"}} {q["p95_time"]}')
+        lines.append(f'wbjdbc_query_duration_seconds{{quantile="0.99"}} {q["p99_time"]}')
+        lines.append(f"wbjdbc_query_duration_seconds_sum {query_sum}")
+        lines.append(f"wbjdbc_query_duration_seconds_count {q['total']}")
+
+        counter("wbjdbc_queries_total", "Total successful queries executed", q['total'])
+        counter("wbjdbc_queries_failed_total", "Total failed queries", q['failed'])
+
+        c = m['connections']
+        counter("wbjdbc_connections_created_total", "New JDBC connections created", c['created'])
+        counter("wbjdbc_connections_reused_total", "Connections served from the pool", c['reused'])
+        counter("wbjdbc_connections_failed_total", "Connection attempts that failed", c['failed'])
+        gauge("wbjdbc_connection_reuse_rate", "Fraction of connections served from the pool (0-1)", c['reuse_rate'])
+
+        p = m['pool']
+        counter("wbjdbc_pool_checkouts_total", "Successful pool checkouts", p['checkouts'])
+        counter("wbjdbc_pool_timeouts_total", "Pool checkout timeouts", p['timeouts'])
+
+        cache = m['cache']
+        counter("wbjdbc_cache_hits_total", "Schema cache hits", cache['hits'])
+        counter("wbjdbc_cache_misses_total", "Schema cache misses", cache['misses'])
+        gauge("wbjdbc_cache_hit_rate", "Schema cache hit rate (0-1)", cache['hit_rate'])
+
+        counter("wbjdbc_batch_operations_total", "Batch operations executed", m['batch_operations'])
+        counter("wbjdbc_reconnects_total", "Successful reconnects after a transient connection failure", m['reconnects'])
+
+        return "\n".join(lines) + "\n"
+
     def export_metrics(self, filepath: Optional[str] = None) -> str:
         """
-        Export metrics to JSON file.
+        Export metrics to a file, as JSON by default or Prometheus text exposition
+        format when WBJDBC_METRICS_PROMETHEUS=true.
 
         Args:
             filepath: Path to export file. If None, uses config.
 
         Returns:
-            JSON string of metrics
+            The exported string (JSON or Prometheus format, matching what was written)
         """
-        metrics = self.get_metrics()
-        metrics['query_stats'] = self.get_query_stats()
+        config = get_config()
+        use_prometheus = config.get('METRICS_PROMETHEUS', False)
 
-        json_data = json.dumps(metrics, indent=2)
+        if use_prometheus:
+            output_data = self.export_prometheus()
+        else:
+            metrics = self.get_metrics()
+            metrics['query_stats'] = self.get_query_stats()
+            output_data = json.dumps(metrics, indent=2)
 
         if filepath is None:
-            config = get_config()
             filepath = config.get('METRICS_FILE')
 
         if filepath:
             try:
                 with open(filepath, 'w') as f:
-                    f.write(json_data)
+                    f.write(output_data)
                 self.logger.info(f"Metrics exported to {filepath}")
             except Exception as e:
                 self.logger.error(f"Failed to export metrics to {filepath}: {e}")
 
-        return json_data
+        return output_data
 
     def reset(self):
         """Reset all metrics (mainly for testing)."""

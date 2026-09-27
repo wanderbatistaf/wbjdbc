@@ -1,5 +1,5 @@
 [![PyPI](https://img.shields.io/pypi/v/wbjdbc)](https://pypi.org/project/wbjdbc/) [![PyPI - Downloads](https://img.shields.io/pypi/dm/wbjdbc)](https://pypi.org/project/wbjdbc/) [![Build Status](https://github.com/wanderbatistaf/wbjdbc/actions/workflows/publish-package.yml/badge.svg)](https://github.com/wanderbatistaf/wbjdbc/actions) ![License: MIT](https://img.shields.io/github/license/wanderbatistaf/wbjdbc) [![Último Commit](https://img.shields.io/github/last-commit/wanderbatistaf/wbjdbc)](https://github.com/wanderbatistaf/wbjdbc) [![GitHub issues](https://img.shields.io/github/issues/wanderbatistaf/wbjdbc)](https://github.com/wanderbatistaf/wbjdbc/issues) [![GitHub forks](https://img.shields.io/github/forks/wanderbatistaf/wbjdbc?style=social)](https://github.com/wanderbatistaf/wbjdbc) [![GitHub stars](https://img.shields.io/github/stars/wanderbatistaf/wbjdbc?style=social)](https://github.com/wanderbatistaf/wbjdbc) 
-# 🧩 wbjdbc v2.0 — JDBC para Python (com suporte a Informix, Pooling, Async e Cache)
+# 🧩 wbjdbc v2.2 — JDBC para Python (com suporte a Informix, Pooling, Async e Cache)
 
 wbjdbc é uma biblioteca JDBC moderna e otimizada para Python, agora com recursos de **pool de conexões**, **execução assíncrona**, **operações em lote**, **cache de metadados** e **mapeamento de tipos**.  
 Totalmente compatível com versões anteriores (v1.x) e pronta para produção.
@@ -73,10 +73,80 @@ conn.execute_batch("INSERT INTO clientes VALUES (?, ?)", data)
 
 ## 🧵 Execução Assíncrona
 
+`execute_async` roda uma query síncrona numa thread separada (bom pra disparar
+queries em paralelo). Pra usar `async`/`await` de verdade, sem bloquear o event loop
+em nenhum ponto (nem no `execute`, nem no `fetchall`), use `async_db_conn`:
+
 ```python
 future = conn.execute_async("SELECT COUNT(*) FROM clientes")
 print(future.result())
+
+# ou, de verdade assíncrono:
+from wbjdbc.aio import async_db_conn
+
+async def main():
+    async with async_db_conn(db_type="informix-sqli", host="server", database="db",
+                              user="user", password="pass", server="informix") as conn:
+        cursor = conn.cursor()
+        await cursor.execute("SELECT * FROM clientes LIMIT 10")
+        rows = await cursor.fetchdh()
+        print(rows)
 ```
+
+---
+
+## 🔁 Retry e Reconexão
+
+Falha transitória na criação da conexão (banco reiniciando, blink de rede) tenta de
+novo automaticamente com backoff, antes de desistir. Nunca reexecuta uma query já
+enviada — só a etapa de conectar.
+
+```python
+conn = connect_optimized(
+    db_type="informix-sqli", host="server", database="db", user="user",
+    password="pass", server="informix",
+    max_retries=3,      # default: WBJDBC_MAX_RETRIES (3)
+    retry_delay=1.0,    # default: WBJDBC_RETRY_DELAY (1.0s, backoff linear)
+)
+```
+
+---
+
+## 🔒 SSL/TLS
+
+```python
+conn = connect_optimized(
+    db_type="postgresql", host="server", database="db", user="user", password="pass",
+    ssl_enabled=True,   # default: WBJDBC_SSL_ENABLED
+    ssl_verify=True,    # default: WBJDBC_SSL_VERIFY
+)
+```
+
+Para Informix, o driver aceita `;SECURITY=SSL` na URL — nomes de propriedade podem
+variar conforme a versão do driver/configuração do servidor, vale conferir a
+documentação do driver em uso antes de depender disso em produção.
+
+---
+
+## ⚠️ Exceções (DB-API 2.0)
+
+Erros de query e de conexão são traduzidos pra hierarquia padrão do DB-API 2.0, com
+`.sqlstate`/`.sqlcode` disponíveis pra tratamento programático:
+
+```python
+from wbjdbc import IntegrityError, OperationalError
+
+try:
+    cursor.execute("INSERT INTO clientes (id) VALUES (?)", (1,))
+except IntegrityError as e:
+    print(f"violação de constraint: {e.sqlstate}")
+except OperationalError:
+    print("conexão caiu")
+```
+
+Hierarquia: `Error` → `InterfaceError` / `DatabaseError` → `DataError`,
+`OperationalError`, `IntegrityError`, `InternalError`, `ProgrammingError`,
+`NotSupportedError`.
 
 ---
 
@@ -84,8 +154,16 @@ print(future.result())
 
 - Tempo médio, p50, p95 e p99 de queries  
 - Estatísticas de pool, cache e conexões  
-- Exportação em JSON (`get_metrics_collector().export_metrics(...)`) — hoje é
-  JSON puro; um endpoint Prometheus nativo ainda está no roadmap.
+- Exportação em JSON ou Prometheus (`get_metrics_collector().export_metrics(...)`,
+  ativado via `WBJDBC_METRICS_PROMETHEUS=true`), ou direto o texto de exposição via
+  `get_metrics_collector().export_prometheus()` numa rota sua:
+
+```python
+@app.route("/metrics")
+def metrics():
+    return get_metrics_collector().export_prometheus(), 200, \
+        {"Content-Type": "text/plain; version=0.0.4"}
+```
 
 ---
 
@@ -100,11 +178,17 @@ DB_PASSWORD=pass
 POOL_MIN=10
 POOL_MAX=20
 CACHE_TTL=600
+WBJDBC_MAX_RETRIES=3
+WBJDBC_RETRY_DELAY=1.0
+WBJDBC_SSL_ENABLED=false
+WBJDBC_METRICS_PROMETHEUS=false
 ```
 
 ---
 
 ## 🧾 Changelog
+
+Ver [CHANGELOG.md](CHANGELOG.md) para o histórico completo e detalhado.
 
 **v2.0.0**
 - Novo pool de conexões (thread-safe)
@@ -120,7 +204,7 @@ MIT © 2025 Wander Freitas Batista
 
 ---
 
-# 🇺🇸 wbjdbc v2.0 — JDBC for Python (Informix, Pooling, Async, Caching)
+# 🇺🇸 wbjdbc v2.2 — JDBC for Python (Informix, Pooling, Async, Caching)
 
 **wbjdbc** is a modern, optimized JDBC library for Python featuring **connection pooling**, **async queries**, **batch execution**, **metadata caching**, and **type mapping**.  
 Fully production-ready and **100% backward compatible** with v1.x.
@@ -195,10 +279,80 @@ conn.execute_batch("INSERT INTO customers VALUES (?, ?)", data)
 
 ## 🧵 Async Execution
 
+`execute_async` runs a sync query on a worker thread (fine for firing off parallel
+queries). For real `async`/`await` with nothing blocking the event loop - not
+`execute`, not `fetchall` - use `async_db_conn`:
+
 ```python
 future = conn.execute_async("SELECT COUNT(*) FROM customers")
 print(future.result())
+
+# or, truly async:
+from wbjdbc.aio import async_db_conn
+
+async def main():
+    async with async_db_conn(db_type="informix-sqli", host="server", database="db",
+                              user="user", password="pass", server="informix") as conn:
+        cursor = conn.cursor()
+        await cursor.execute("SELECT * FROM customers LIMIT 10")
+        rows = await cursor.fetchdh()
+        print(rows)
 ```
+
+---
+
+## 🔁 Retry & Reconnect
+
+A transient failure establishing the connection (database restarting, brief network
+blip) is retried automatically with backoff before giving up. It only ever retries
+the connect step - never a query already sent to the server.
+
+```python
+conn = connect_optimized(
+    db_type="informix-sqli", host="server", database="db", user="user",
+    password="pass", server="informix",
+    max_retries=3,      # default: WBJDBC_MAX_RETRIES (3)
+    retry_delay=1.0,    # default: WBJDBC_RETRY_DELAY (1.0s, linear backoff)
+)
+```
+
+---
+
+## 🔒 SSL/TLS
+
+```python
+conn = connect_optimized(
+    db_type="postgresql", host="server", database="db", user="user", password="pass",
+    ssl_enabled=True,   # default: WBJDBC_SSL_ENABLED
+    ssl_verify=True,    # default: WBJDBC_SSL_VERIFY
+)
+```
+
+For Informix, the driver accepts `;SECURITY=SSL` on the URL - property names can vary
+by driver version/server configuration, so check the docs for the driver version
+you're running before relying on this in production.
+
+---
+
+## ⚠️ Exceptions (DB-API 2.0)
+
+Query and connection errors are translated into the standard DB-API 2.0 hierarchy,
+with `.sqlstate`/`.sqlcode` available for programmatic handling:
+
+```python
+from wbjdbc import IntegrityError, OperationalError
+
+try:
+    cursor.execute("INSERT INTO customers (id) VALUES (?)", (1,))
+except IntegrityError as e:
+    print(f"constraint violation: {e.sqlstate}")
+except OperationalError:
+    print("connection lost")
+```
+
+Hierarchy: `Error` → `InterfaceError` / `DatabaseError` → `DataError`,
+`OperationalError`, `IntegrityError`, `InternalError`, `ProgrammingError`,
+`NotSupportedError`.
 
 ---
 
@@ -206,8 +360,16 @@ print(future.result())
 
 - Query latency (avg, p50, p95, p99)  
 - Pool and cache statistics  
-- JSON export (`get_metrics_collector().export_metrics(...)`) — a native Prometheus
-  endpoint is on the roadmap, not implemented yet.  
+- JSON or Prometheus export (`get_metrics_collector().export_metrics(...)`, toggled
+  via `WBJDBC_METRICS_PROMETHEUS=true`), or the raw exposition text straight from
+  `get_metrics_collector().export_prometheus()` in your own route:
+
+```python
+@app.route("/metrics")
+def metrics():
+    return get_metrics_collector().export_prometheus(), 200, \
+        {"Content-Type": "text/plain; version=0.0.4"}
+```
 
 ---
 
@@ -222,11 +384,17 @@ DB_PASSWORD=pass
 POOL_MIN=10
 POOL_MAX=20
 CACHE_TTL=600
+WBJDBC_MAX_RETRIES=3
+WBJDBC_RETRY_DELAY=1.0
+WBJDBC_SSL_ENABLED=false
+WBJDBC_METRICS_PROMETHEUS=false
 ```
 
 ---
 
 ## 🧾 Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for the full, detailed history.
 
 **v2.0.0**
 - Thread-safe connection pool  

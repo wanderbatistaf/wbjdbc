@@ -229,6 +229,159 @@ class TestPoolCapacity:
         assert pool.stats()["active"] == 0
 
 
+class TestConnectionRetry:
+    def _build(self, side_effect, max_retries, mock_jpype):
+        from wbjdbc import ConnectionPool
+
+        mock_jpype.JClass = MagicMock()
+        mock_jpype.java.sql.DriverManager.getConnection.side_effect = side_effect
+
+        pool = ConnectionPool(
+            jdbc_url="jdbc:test://localhost/testdb",
+            driver_class="com.example.Driver",
+            jars=[],
+            user="user",
+            password="pass",
+            pool_size=0,  # no background prewarm consuming side_effect
+            max_overflow=5,
+            checkout_timeout=5,
+            max_retries=max_retries,
+            retry_delay=0,
+        )
+        pool._prewarm_done.wait(timeout=1.0)
+        return pool
+
+    def test_succeeds_after_transient_failures(self):
+        from wbjdbc import _PooledConn
+        from wbjdbc.metrics import get_metrics_collector, reset_metrics
+
+        reset_metrics()
+        mock_jconn = _mock_jconn()
+        mock_jpype = MagicMock()
+
+        with patch("wbjdbc.start_jvm"), patch("wbjdbc._get_jpype", return_value=mock_jpype):
+            pool = self._build([Exception("blip1"), Exception("blip2"), mock_jconn], 3, mock_jpype)
+            conn = pool._new_conn()
+
+        assert isinstance(conn, _PooledConn)
+        assert mock_jpype.java.sql.DriverManager.getConnection.call_count == 3
+        assert get_metrics_collector().get_metrics()["reconnects"] == 1
+
+    def test_exhausts_retries_and_raises(self):
+        mock_jpype = MagicMock()
+
+        with patch("wbjdbc.start_jvm"), patch("wbjdbc._get_jpype", return_value=mock_jpype):
+            pool = self._build(Exception("db is down"), 2, mock_jpype)
+            with pytest.raises(Exception, match="db is down"):
+                pool._new_conn()
+
+        assert mock_jpype.java.sql.DriverManager.getConnection.call_count == 3
+
+    def test_no_retry_by_default_fails_immediately(self):
+        mock_jpype = MagicMock()
+
+        with patch("wbjdbc.start_jvm"), patch("wbjdbc._get_jpype", return_value=mock_jpype):
+            pool = self._build(Exception("nope"), 0, mock_jpype)
+            with pytest.raises(Exception, match="nope"):
+                pool._new_conn()
+
+        assert mock_jpype.java.sql.DriverManager.getConnection.call_count == 1
+
+
+class TestSslParams:
+    def test_mysql_ssl_verify(self):
+        from wbjdbc import _apply_ssl_params
+
+        url = _apply_ssl_params("mysql", "jdbc:mysql://h:3306/db", ssl_verify=True)
+        assert url == "jdbc:mysql://h:3306/db?sslMode=VERIFY_CA"
+
+    def test_mysql_ssl_no_verify(self):
+        from wbjdbc import _apply_ssl_params
+
+        url = _apply_ssl_params("mysql", "jdbc:mysql://h:3306/db", ssl_verify=False)
+        assert url == "jdbc:mysql://h:3306/db?sslMode=REQUIRED"
+
+    def test_postgresql_ssl_verify(self):
+        from wbjdbc import _apply_ssl_params
+
+        url = _apply_ssl_params("postgresql", "jdbc:postgresql://h:5432/db", ssl_verify=True)
+        assert url == "jdbc:postgresql://h:5432/db?ssl=true&sslmode=verify-full"
+
+    def test_postgresql_ssl_no_verify(self):
+        from wbjdbc import _apply_ssl_params
+
+        url = _apply_ssl_params("postgresql", "jdbc:postgresql://h:5432/db", ssl_verify=False)
+        assert url == "jdbc:postgresql://h:5432/db?ssl=true&sslmode=require"
+
+    def test_informix_ssl(self):
+        from wbjdbc import _apply_ssl_params
+
+        url = _apply_ssl_params(
+            "informix-sqli", "jdbc:informix-sqli://h:1526/db:INFORMIXSERVER=s", ssl_verify=True
+        )
+        assert url == "jdbc:informix-sqli://h:1526/db:INFORMIXSERVER=s;SECURITY=SSL"
+
+    def test_unknown_db_type_returns_url_unchanged(self):
+        from wbjdbc import _apply_ssl_params
+
+        url = _apply_ssl_params("oracle", "jdbc:oracle://h:1521/db", ssl_verify=True)
+        assert url == "jdbc:oracle://h:1521/db"
+
+    def test_appends_with_ampersand_when_query_string_already_present(self):
+        from wbjdbc import _apply_ssl_params
+
+        url = _apply_ssl_params("mysql", "jdbc:mysql://h:3306/db?useUnicode=true", ssl_verify=True)
+        assert url == "jdbc:mysql://h:3306/db?useUnicode=true&sslMode=VERIFY_CA"
+
+
+class TestEnsureJvmStarted:
+    def test_noop_when_jvm_already_started(self):
+        from wbjdbc import ensure_jvm_started
+
+        mock_jpype = MagicMock()
+        mock_jpype.isJVMStarted.return_value = True
+        with patch("wbjdbc._get_jpype", return_value=mock_jpype), \
+             patch("wbjdbc.start_jvm") as mock_start:
+            ensure_jvm_started("informix-sqli")
+
+        mock_start.assert_not_called()
+
+    def test_starts_jvm_with_resolved_jar_when_not_started(self):
+        from wbjdbc import ensure_jvm_started, DEFAULT_DRIVERS
+
+        mock_jpype = MagicMock()
+        mock_jpype.isJVMStarted.return_value = False
+        with patch("wbjdbc._get_jpype", return_value=mock_jpype), \
+             patch("wbjdbc.start_jvm") as mock_start:
+            ensure_jvm_started("mysql")
+
+        mock_start.assert_called_once_with([DEFAULT_DRIVERS["mysql"]["jar"]], db_type="mysql")
+
+    def test_accepts_legacy_integer_db_type(self):
+        from wbjdbc import ensure_jvm_started, DEFAULT_DRIVERS
+
+        mock_jpype = MagicMock()
+        mock_jpype.isJVMStarted.return_value = False
+        with patch("wbjdbc._get_jpype", return_value=mock_jpype), \
+             patch("wbjdbc.start_jvm") as mock_start:
+            ensure_jvm_started(1)  # 1 -> informix-sqli
+
+        mock_start.assert_called_once_with(
+            [DEFAULT_DRIVERS["informix-sqli"]["jar"]], db_type="informix-sqli"
+        )
+
+    def test_unknown_db_type_starts_jvm_without_extra_jar(self):
+        from wbjdbc import ensure_jvm_started
+
+        mock_jpype = MagicMock()
+        mock_jpype.isJVMStarted.return_value = False
+        with patch("wbjdbc._get_jpype", return_value=mock_jpype), \
+             patch("wbjdbc.start_jvm") as mock_start:
+            ensure_jvm_started(None)
+
+        mock_start.assert_called_once_with(None, db_type=None)
+
+
 class TestGetTableColumns:
     def _rs_for_columns(self, rows):
         rs = MagicMock()

@@ -20,6 +20,11 @@ from .cache import get_schema_cache, reset_cache
 from .types import TypeMapper, JDBC_TYPES
 from .optimized import OptimizedJDBCConnection, OptimizedJDBCCursor
 from ._types import _j2p, _set_param, _rewrite_named, _SENSITIVE
+from .exceptions import (
+    Error, InterfaceError, DatabaseError, DataError, OperationalError,
+    IntegrityError, InternalError, ProgrammingError, NotSupportedError,
+    translate_jdbc_exception, is_java_exception,
+)
 
 # Default configuration for database drivers
 DEFAULT_DRIVERS = {
@@ -41,7 +46,7 @@ DEFAULT_DRIVERS = {
 }
 
 # Version
-__version__ = "2.1.0"
+__version__ = "2.2.0"
 version = __version__
 
 _STMT_CACHE_SIZE = 20
@@ -104,16 +109,16 @@ class _DirectCursor:
     def execute(self, sql, params=None):
         if isinstance(params, dict):
             sql, params = _rewrite_named(sql, params)
-        pstmt = self._get_pstmt(sql)
-        pstmt.clearParameters()
-        if self._query_timeout_sec:
-            pstmt.setQueryTimeout(self._query_timeout_sec)
-        if params:
-            for i, v in enumerate(params, 1):
-                _set_param(pstmt, i, v)
         t0 = time.monotonic()
         success = True
         try:
+            pstmt = self._get_pstmt(sql)
+            pstmt.clearParameters()
+            if self._query_timeout_sec:
+                pstmt.setQueryTimeout(self._query_timeout_sec)
+            if params:
+                for i, v in enumerate(params, 1):
+                    _set_param(pstmt, i, v)
             if _is_select(sql):
                 rs = pstmt.executeQuery()
                 meta = rs.getMetaData()
@@ -136,8 +141,10 @@ class _DirectCursor:
                 self._rows = []
                 self._cols = []
                 self.description = None
-        except Exception:
+        except Exception as e:
             success = False
+            if is_java_exception(e):
+                raise translate_jdbc_exception(e) from e
             raise
         finally:
             elapsed = time.monotonic() - t0
@@ -152,13 +159,13 @@ class _DirectCursor:
     def executemany(self, sql, params_list):
         if params_list and isinstance(params_list[0], dict):
             sql, _ = _rewrite_named(sql, params_list[0])
-        pstmt = self._get_pstmt(sql)
-        pstmt.clearParameters()
-        if self._query_timeout_sec:
-            pstmt.setQueryTimeout(self._query_timeout_sec)
         t0 = time.monotonic()
         success = True
         try:
+            pstmt = self._get_pstmt(sql)
+            pstmt.clearParameters()
+            if self._query_timeout_sec:
+                pstmt.setQueryTimeout(self._query_timeout_sec)
             for params in params_list:
                 if isinstance(params, dict):
                     _, params = _rewrite_named(sql, params)
@@ -168,8 +175,10 @@ class _DirectCursor:
             counts = pstmt.executeBatch()
             self.rowcount = sum(int(c) for c in counts if int(c) >= 0)
             return self.rowcount
-        except Exception:
+        except Exception as e:
             success = False
+            if is_java_exception(e):
+                raise translate_jdbc_exception(e) from e
             raise
         finally:
             elapsed = time.monotonic() - t0
@@ -336,6 +345,31 @@ class _PooledConn:
         self.close()
 
 
+def _connect_with_retry(connect_fn, max_retries=0, retry_delay=1.0):
+    """
+    Call connect_fn() with linear backoff retry, for transient failures when
+    establishing a new JDBC connection (server restarting, brief network blip).
+
+    Only ever retries the connect step itself - never a query already sent to the
+    server, which would risk re-executing a non-idempotent statement (INSERT/UPDATE).
+    Records a reconnect metric on any attempt after the first that succeeds.
+    """
+    last_exc = None
+    for attempt in range(max_retries + 1):
+        try:
+            conn = connect_fn()
+            if attempt > 0:
+                get_metrics_collector().record_reconnect()
+            return conn
+        except Exception as e:
+            last_exc = e
+            if attempt < max_retries:
+                time.sleep(retry_delay * (attempt + 1))
+    if is_java_exception(last_exc):
+        raise translate_jdbc_exception(last_exc) from last_exc
+    raise last_exc
+
+
 class ConnectionPool:
     """Thread-safe JDBC connection pool using _DirectCursor (JPype direct, no jaydebeapi lock)."""
 
@@ -353,6 +387,8 @@ class ConnectionPool:
         slow_query_ms=500,
         decimal_as_float=False,
         db_type=None,
+        max_retries=0,
+        retry_delay=1.0,
     ):
         self._jdbc_url = jdbc_url
         self._driver_class = driver_class
@@ -366,6 +402,8 @@ class ConnectionPool:
         self._query_timeout_sec = query_timeout_sec
         self._slow_query_ms = slow_query_ms
         self._decimal_as_float = decimal_as_float
+        self._max_retries = max_retries
+        self._retry_delay = retry_delay
 
         self._idle = []
         self._lock = threading.Lock()
@@ -399,10 +437,14 @@ class ConnectionPool:
     def _new_conn(self):
         jpype = _get_jpype()
         metrics = get_metrics_collector()
-        try:
-            jconn = jpype.java.sql.DriverManager.getConnection(
+
+        def _do_connect():
+            return jpype.java.sql.DriverManager.getConnection(
                 self._jdbc_url, self._user, self._password
             )
+
+        try:
+            jconn = _connect_with_retry(_do_connect, self._max_retries, self._retry_delay)
         except Exception:
             metrics.record_connection(success=False)
             raise
@@ -642,6 +684,52 @@ def connect_to_db(db_type, host, database, user, password, port=None, server=Non
         return None
 
 
+def _apply_ssl_params(db_type, jdbc_url, ssl_verify):
+    """
+    Append SSL/TLS connection properties to jdbc_url for the given db_type.
+
+    MySQL and PostgreSQL property names below follow their current JDBC driver
+    documentation (mysql-connector-j 8.x / pgjdbc). Informix's `;SECURITY=SSL` is a
+    documented IBM JDBC driver property, but the exact property set can vary by driver
+    version and server-side SSL configuration - verify against the docs for the driver
+    version in use before relying on this in production.
+    """
+    if db_type == "mysql":
+        mode = "VERIFY_CA" if ssl_verify else "REQUIRED"
+        sep = "&" if "?" in jdbc_url else "?"
+        return f"{jdbc_url}{sep}sslMode={mode}"
+    if db_type == "postgresql":
+        mode = "verify-full" if ssl_verify else "require"
+        sep = "&" if "?" in jdbc_url else "?"
+        return f"{jdbc_url}{sep}ssl=true&sslmode={mode}"
+    if db_type == "informix-sqli":
+        return f"{jdbc_url};SECURITY=SSL"
+    return jdbc_url
+
+
+def ensure_jvm_started(db_type=None):
+    """
+    Start the JVM synchronously on the calling thread, if it isn't already running.
+
+    JPype's automatic shutdown-on-exit hook does not cleanly tear down a JVM that was
+    started from a worker thread rather than the main thread - in practice this shows
+    up as the Python process hanging on exit instead of terminating. wbjdbc.aio calls
+    this before dispatching connect_optimized() to a thread pool via
+    asyncio.to_thread(), so the JVM always starts on the same thread as the asyncio
+    event loop (normally the main thread) instead of inside the worker thread.
+
+    Safe to call redundantly - it's a no-op if the JVM is already started.
+    """
+    jpype = _get_jpype()
+    if jpype.isJVMStarted():
+        return
+    db_type_mapping = {1: "informix-sqli", 2: "mysql", 3: "postgresql"}
+    if db_type is not None:
+        db_type = db_type_mapping.get(db_type, db_type)
+    jar = DEFAULT_DRIVERS[db_type]["jar"] if db_type in DEFAULT_DRIVERS else None
+    start_jvm([jar] if jar else None, db_type=db_type)
+
+
 def connect_optimized(
     db_type=None,
     host=None,
@@ -660,10 +748,23 @@ def connect_optimized(
     pool_size=5,
     max_overflow=10,
     checkout_timeout=30,
+    ssl_enabled=None,
+    ssl_verify=None,
+    max_retries=None,
+    retry_delay=None,
     **kwargs
 ):
     """Create an optimized JDBC connection using _DirectCursor (bypasses jaydebeapi global lock)."""
     config = get_config(config_file)
+
+    if ssl_enabled is None:
+        ssl_enabled = config.get('SSL_ENABLED', False)
+    if ssl_verify is None:
+        ssl_verify = config.get('SSL_VERIFY', True)
+    if max_retries is None:
+        max_retries = config.get('MAX_RETRIES', 3)
+    if retry_delay is None:
+        retry_delay = config.get('RETRY_DELAY', 1.0)
 
     db_type_mapping = {1: "informix-sqli", 2: "mysql", 3: "postgresql"}
     if db_type is not None:
@@ -716,6 +817,9 @@ def connect_optimized(
     else:
         jdbc_url = f"jdbc:{db_type}://{host}:{resolved_port}/{database}"
 
+    if ssl_enabled:
+        jdbc_url = _apply_ssl_params(db_type, jdbc_url, ssl_verify)
+
     if use_pool:
         pool_key = f"{db_type}:{host}:{resolved_port}:{database}:{user}"
         with _pools_lock:
@@ -733,6 +837,8 @@ def connect_optimized(
                     slow_query_ms=slow_query_ms,
                     decimal_as_float=decimal_as_float,
                     db_type=db_type,
+                    max_retries=max_retries,
+                    retry_delay=retry_delay,
                 )
             pool = _pools[pool_key]
         conn = pool.acquire()
@@ -741,7 +847,11 @@ def connect_optimized(
         start_jvm([jar], db_type=db_type)
         jpype = _get_jpype()
         jpype.JClass(driver_class)
-        jconn = jpype.java.sql.DriverManager.getConnection(jdbc_url, user, password)
+
+        def _do_connect():
+            return jpype.java.sql.DriverManager.getConnection(jdbc_url, user, password)
+
+        jconn = _connect_with_retry(_do_connect, max_retries, retry_delay)
         jconn.setAutoCommit(False)
         conn = _PooledConn(jconn, None)
 
@@ -763,6 +873,7 @@ __all__ = [
     # Legacy API (backward compatible)
     "connect_to_db",
     "start_jvm",
+    "ensure_jvm_started",
     "JDBCConnection",
     "JDBCCursor",
     "ConnectionError",
@@ -790,6 +901,17 @@ __all__ = [
     "reset_cache",
     "TypeMapper",
     "JDBC_TYPES",
+
+    # DB-API 2.0 exception hierarchy
+    "Error",
+    "InterfaceError",
+    "DatabaseError",
+    "DataError",
+    "OperationalError",
+    "IntegrityError",
+    "InternalError",
+    "ProgrammingError",
+    "NotSupportedError",
 
     # Version
     "__version__",
