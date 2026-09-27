@@ -14,6 +14,11 @@ def _build_jpype_stub():
     jpype.JByte = object
     jpype.JLong = lambda v: v
 
+    class _JException(Exception):
+        pass
+
+    jpype.JException = _JException
+
     java = types.SimpleNamespace(
         lang=types.SimpleNamespace(
             Class=types.SimpleNamespace(forName=lambda *a: None),
@@ -29,6 +34,11 @@ def _build_jpype_stub():
             Date=object,
             Time=object,
             Timestamp=object,
+            Blob=type("Blob", (), {}),
+            Clob=type("Clob", (), {}),
+            Types=types.SimpleNamespace(
+                INTEGER=4, VARCHAR=12, DECIMAL=3, DATE=91, TIMESTAMP=93,
+            ),
             DriverManager=types.SimpleNamespace(
                 getConnection=lambda *a: None,
             ),

@@ -13,7 +13,55 @@ _FLOAT_CLASSES = frozenset({
 })
 
 
-def _j2p(obj, decimal_as_float=False):
+class LobHandle:
+    """Lazy handle to a JDBC BLOB/CLOB - only used when execute(..., stream_lobs=True).
+
+    Wraps the raw java.sql.Blob/Clob object instead of materializing it into memory
+    at fetch time. Per the java.sql.Blob/Clob javadoc, the underlying LOB locator
+    remains valid for the duration of the transaction in which it was created,
+    regardless of whether the ResultSet it came from has since been closed - so this
+    can safely be read any time before the connection's next commit()/rollback().
+
+    Trust the javadoc here, not your instincts. Every instinct says "the ResultSet is
+    closed, this must be dead" and every instinct is wrong.
+    """
+
+    def __init__(self, java_lob, is_binary):
+        self._lob = java_lob
+        self._is_binary = is_binary
+
+    def read(self, chunk_size=-1):
+        """Read the whole LOB (chunk_size=-1, default) or up to chunk_size bytes/chars
+        starting at the beginning. Returns bytes for a BLOB, str for a CLOB."""
+        length = int(self._lob.length())
+        n = length if chunk_size < 0 else min(chunk_size, length)
+        if n <= 0:
+            return b"" if self._is_binary else ""
+        if self._is_binary:
+            return bytes(self._lob.getBytes(1, n))
+        return str(self._lob.getSubString(1, n))
+
+    def stream(self, chunk_size=8192):
+        """Yield the LOB in chunks (bytes for BLOB, str for CLOB) without loading it
+        all into memory at once."""
+        length = int(self._lob.length())
+        pos = 1
+        while pos <= length:
+            n = min(chunk_size, length - pos + 1)
+            if self._is_binary:
+                yield bytes(self._lob.getBytes(pos, n))
+            else:
+                yield str(self._lob.getSubString(pos, n))
+            pos += n
+
+    def close(self):
+        try:
+            self._lob.free()
+        except Exception:
+            pass
+
+
+def _j2p(obj, decimal_as_float=False, stream_lobs=False):
     """Convert a JDBC/Java value to a Python-native value."""
     if obj is None:
         return None
@@ -44,6 +92,29 @@ def _j2p(obj, decimal_as_float=False):
     if cn == "java.sql.Time":
         lt = obj.toLocalTime()
         return datetime.time(lt.getHour(), lt.getMinute(), lt.getSecond())
+
+    # Blob/Clob are interfaces, not concrete classes - the classname (cn) is driver-
+    # specific (e.g. Informix's own Blob/Clob implementation), so this can't dispatch
+    # on cn like everything above. isinstance against the JDBC interface works
+    # regardless of which driver produced the object.
+    #
+    # Before this check existed, a BLOB fetched here came back as literally the
+    # string "com.informix.jdbc.IfxLob@6bc7c054" - the generic str(obj) fallback
+    # below, cheerfully returning the Java object's memory address as if it were
+    # your data. Nobody noticed for a while. That's the scary part.
+    try:
+        import jpype
+        if isinstance(obj, jpype.java.sql.Blob):
+            if stream_lobs:
+                return LobHandle(obj, is_binary=True)
+            return bytes(obj.getBytes(1, int(obj.length())))
+        if isinstance(obj, jpype.java.sql.Clob):
+            if stream_lobs:
+                return LobHandle(obj, is_binary=False)
+            return str(obj.getSubString(1, int(obj.length())))
+    except (ImportError, AttributeError):
+        pass
+
     return str(obj).strip()
 
 

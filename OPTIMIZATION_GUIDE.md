@@ -12,6 +12,13 @@
   - [Metadata Caching](#metadata-caching)
   - [Type Mapping](#type-mapping)
   - [Dirty Reads (Informix)](#dirty-reads-informix)
+  - [Retry & Reconnect](#retry--reconnect)
+  - [SSL/TLS](#ssltls)
+  - [Exceptions (DB-API 2.0)](#exceptions-db-api-20)
+  - [Real Async Support](#real-async-support)
+  - [Stored Procedures](#stored-procedures)
+  - [LOB (BLOB/CLOB) Handling](#lob-blobclob-handling)
+  - [Savepoints](#savepoints)
   - [Metrics & Logging](#metrics--logging)
 - [Configuration](#configuration)
 - [Performance Targets](#performance-targets)
@@ -477,6 +484,245 @@ WBJDBC_INFORMIX_ISOLATION_LEVEL=DIRTY_READ
 
 ---
 
+### Retry & Reconnect
+
+A transient failure while establishing a JDBC connection (server restarting, a brief
+network blip) is retried automatically with linear backoff before giving up. This
+only ever retries the *connect* step - a query already sent to the server is never
+retried automatically, since that could re-execute a non-idempotent statement
+(INSERT/UPDATE) twice.
+
+**Usage:**
+
+```python
+conn = connect_optimized(
+    db_type="informix-sqli",
+    # ... connection params ...
+    max_retries=3,     # default: WBJDBC_MAX_RETRIES (3)
+    retry_delay=1.0,   # default: WBJDBC_RETRY_DELAY (1.0s; wait grows linearly per attempt)
+)
+```
+
+**Configuration:**
+
+```bash
+WBJDBC_MAX_RETRIES=3
+WBJDBC_RETRY_DELAY=1.0
+```
+
+A successful reconnect (any attempt after the first) increments the `reconnects`
+metric, visible via `get_metrics_collector().get_metrics()['reconnects']`.
+
+---
+
+### SSL/TLS
+
+Enable SSL on the JDBC connection. **Note:** exact property names/behavior are driver
+and server dependent - the ones below are the current, documented defaults for each
+driver, but verify against your driver version's docs (especially for Informix)
+before relying on this in production; this project has no way to test against a live
+Informix server.
+
+**Usage:**
+
+```python
+conn = connect_optimized(
+    db_type="postgresql",
+    # ... connection params ...
+    ssl_enabled=True,   # default: WBJDBC_SSL_ENABLED (false)
+    ssl_verify=True,    # default: WBJDBC_SSL_VERIFY (true)
+)
+```
+
+**What gets appended to the JDBC URL, per `db_type`:**
+
+| `db_type` | `ssl_verify=True` | `ssl_verify=False` |
+|---|---|---|
+| `mysql` | `?sslMode=VERIFY_CA` | `?sslMode=REQUIRED` |
+| `postgresql` | `?ssl=true&sslmode=verify-full` | `?ssl=true&sslmode=require` |
+| `informix-sqli` | `;SECURITY=SSL` | `;SECURITY=SSL` |
+
+**Configuration:**
+
+```bash
+WBJDBC_SSL_ENABLED=false
+WBJDBC_SSL_VERIFY=true
+```
+
+---
+
+### Exceptions (DB-API 2.0)
+
+`wbjdbc/exceptions.py` provides a standard PEP 249 (DB-API 2.0) exception hierarchy.
+Errors raised by `_DirectCursor.execute()`/`executemany()` and by connection
+establishment are translated from the underlying Java `SQLException` into one of
+these, classified by the exception's SQLSTATE class (an ANSI SQL standard code, not
+specific to any one database):
+
+```
+Error
+├── InterfaceError
+└── DatabaseError
+    ├── DataError            (SQLSTATE class 22)
+    ├── OperationalError     (SQLSTATE class 08, 40 - connection lost, rollback)
+    ├── IntegrityError       (SQLSTATE class 23 - constraint violation)
+    ├── InternalError        (SQLSTATE class 24, 25, 2B)
+    ├── ProgrammingError     (SQLSTATE class 26, 34, 3D, 3F, 42 - syntax, bad name)
+    └── NotSupportedError    (SQLSTATE class 0A)
+```
+
+Each instance carries `.sqlstate` and `.sqlcode` (the driver's numeric error code -
+Informix's ISAM code, for example) when the underlying exception exposes them.
+
+**Usage:**
+
+```python
+from wbjdbc import IntegrityError, OperationalError, ProgrammingError
+
+try:
+    cursor.execute("INSERT INTO customers (id) VALUES (?)", (1,))
+except IntegrityError as e:
+    print(f"constraint violation ({e.sqlstate}): {e}")
+except OperationalError:
+    # connection-level failure - safe to retry the whole operation
+    ...
+```
+
+Only errors from `connect_optimized()`'s core are translated this way; the deprecated
+`connect_to_db()`/`optimized.py` legacy paths keep raising jaydebeapi's own
+`DatabaseError` as before.
+
+---
+
+### Real Async Support
+
+`wbjdbc.aio.async_db_conn` wraps `connect_optimized()` so that **every** JDBC call
+inside the `async with` block - not just connect/commit/close - runs in a worker
+thread via `asyncio.to_thread()`, keeping the event loop free while a query is in
+flight. `execute_async()` (thread-pool based, still useful for fire-and-forget
+parallel queries from sync code) is unaffected and continues to work as before.
+
+**Usage:**
+
+```python
+from wbjdbc.aio import async_db_conn
+
+async def main():
+    async with async_db_conn(
+        db_type="informix-sqli", host="server", database="db",
+        user="user", password="pass", server="informix",
+    ) as conn:
+        cursor = conn.cursor()
+        await cursor.execute("SELECT * FROM customers LIMIT 10")
+        rows = await cursor.fetchdh()
+
+        # batch and schema helpers are async too
+        await conn.execute_batch("INSERT INTO customers VALUES (?, ?)", data)
+        columns = await conn.get_table_columns("customers")
+```
+
+`AsyncConnection`/`AsyncCursor` (in `wbjdbc/aio.py`) are thin wrappers around the same
+`_PooledConn`/`_DirectCursor` core `connect_optimized()` uses - no JDBC logic is
+duplicated.
+
+---
+
+### Stored Procedures
+
+`cursor.callproc()` calls a stored procedure via JDBC's `CallableStatement` -
+something the library had no way to do before. Handles IN, OUT and INOUT parameters,
+and any result set the procedure returns is fetched afterwards exactly like a SELECT
+(`fetchone()`/`fetchall()`/`fetchdh()`).
+
+**Usage:**
+
+```python
+from wbjdbc.types import JDBC_TYPES  # java.sql.Types constants
+
+cursor = conn.cursor()
+
+# OUT parameter: PROCEDURE total_for_customer(IN id, OUT total)
+out_values = cursor.callproc(
+    "total_for_customer",
+    [42, None],                      # params: id=42, total=placeholder (OUT)
+    out_types={2: JDBC_TYPES['DECIMAL']},  # position 2 is OUT, type DECIMAL
+)
+print(out_values[0])  # the resulting total
+
+# INOUT parameter: value is sent, then overwritten by the procedure
+out_values = cursor.callproc("adjust_and_report", [100], out_types={1: JDBC_TYPES['INTEGER']})
+
+# Procedure returning a result set
+cursor.callproc("list_active_customers")
+for row in cursor.fetchdh():
+    print(row)
+```
+
+`conn.callproc(...)` (on the connection object, not just the cursor) is also
+available and mirrors `execute_query()`/`execute_batch()`.
+
+**Notes:**
+- A position appears in `out_types` when it's OUT or INOUT; a `None` value in
+  `params` (or a position past the end of `params`) means pure OUT, a non-`None`
+  value means INOUT.
+- Unlike `execute()`, the `CallableStatement` is **not** cached (a fresh one is
+  prepared and closed per call) - procedure calls aren't the statement-cache's hot
+  path, and this keeps OUT parameter registration simple and correct.
+
+---
+
+### LOB (BLOB/CLOB) Handling
+
+By default, `BLOB`/`CLOB` columns are materialized to `bytes`/`str`. `Blob`/`Clob` are
+JDBC *interfaces*, so unlike every other type conversion in `_j2p()`, they're detected
+via an `isinstance` check against the interface rather than by concrete class name
+(which varies by driver).
+
+For large objects, pass `stream_lobs=True` to `execute()` to get a `LobHandle`
+instead of the fully-materialized value, and read it in chunks:
+
+```python
+cursor.execute("SELECT id, document FROM documents WHERE id = ?", (1,), stream_lobs=True)
+doc_id, document = cursor.fetchone()
+
+with open(f"document_{doc_id}.bin", "wb") as f:
+    for chunk in document.stream(chunk_size=64 * 1024):
+        f.write(chunk)
+document.close()
+
+# or read it all at once:
+data = document.read()
+```
+
+**Note:** per the JDBC `Blob`/`Clob` spec, the LOB locator remains valid for the
+duration of the transaction in which it was created, regardless of whether the
+`ResultSet` it came from has since been closed - so a `LobHandle` can safely be read
+any time before the connection's next `commit()`/`rollback()`.
+
+---
+
+### Savepoints
+
+Partial rollback within a transaction, without aborting the whole thing:
+
+```python
+cursor.execute("INSERT INTO orders (id, status) VALUES (?, ?)", (1, "pending"))
+
+try:
+    with conn.savepoint_scope("before_risky_update"):
+        cursor.execute("UPDATE inventory SET qty = qty - 1 WHERE id = ?", (999,))
+        # if this raises, only the UPDATE above is undone - the INSERT above stays
+except IntegrityError:
+    print("risky update failed, rolled back to savepoint - order still stands")
+
+conn.commit()
+```
+
+Lower-level methods are also available: `conn.savepoint(name=None)`,
+`conn.rollback_to(savepoint)`, `conn.release_savepoint(savepoint)`.
+
+---
+
 ### Metrics & Logging
 
 Production-ready metrics collection and logging.
@@ -498,6 +744,10 @@ print(f"Cache hit rate: {stats['cache']['hit_rate']*100}%")
 
 # Export to JSON file
 metrics.export_metrics('metrics.json')
+
+# Or Prometheus text exposition format (set WBJDBC_METRICS_PROMETHEUS=true to make
+# export_metrics() use this format too)
+prometheus_text = metrics.export_prometheus()
 ```
 
 **Logging:**
@@ -521,6 +771,7 @@ WBJDBC_LOG_SQL_QUERIES=true
 # Metrics
 WBJDBC_METRICS_ENABLED=true
 WBJDBC_METRICS_FILE=/var/metrics/wbjdbc.json
+WBJDBC_METRICS_PROMETHEUS=false   # true = export_metrics() writes Prometheus format
 ```
 
 **Metrics Available:**

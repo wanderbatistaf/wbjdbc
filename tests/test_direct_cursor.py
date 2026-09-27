@@ -309,6 +309,75 @@ class TestNamedParams:
         assert cur.rowcount == 1
 
 
+class TestDirectCursorExceptionTranslation:
+    def test_java_exception_during_prepare_is_translated(self):
+        """prepareStatement() failures (bad table/syntax) must be translated too,
+        not just failures from executeQuery/executeUpdate."""
+        import jpype
+        from wbjdbc.exceptions import ProgrammingError
+
+        class FakeSQLException(jpype.JException):
+            def getSQLState(self):
+                return "42000"
+
+            def getErrorCode(self):
+                return -201
+
+        jc = MagicMock()
+        jc.prepareStatement.side_effect = FakeSQLException("syntax error")
+
+        cur = _cursor(jc)
+        with pytest.raises(ProgrammingError) as exc_info:
+            cur.execute("SELECT * FROM")
+
+        assert exc_info.value.sqlstate == "42000"
+        assert exc_info.value.sqlcode == -201
+
+    def test_java_exception_during_execute_is_translated(self):
+        import jpype
+        from wbjdbc.exceptions import IntegrityError
+
+        class FakeSQLException(jpype.JException):
+            def getSQLState(self):
+                return "23000"
+
+            def getErrorCode(self):
+                return -239
+
+        jc, pstmt = _make_java_conn(update_count=0)
+        pstmt.executeUpdate.side_effect = FakeSQLException("unique constraint")
+
+        cur = _cursor(jc)
+        with pytest.raises(IntegrityError):
+            cur.execute("INSERT INTO t VALUES (1)")
+
+    def test_non_java_exception_passes_through_unchanged(self):
+        jc, pstmt = _make_java_conn(update_count=0)
+        pstmt.executeUpdate.side_effect = ValueError("some python bug")
+
+        cur = _cursor(jc)
+        with pytest.raises(ValueError, match="some python bug"):
+            cur.execute("INSERT INTO t VALUES (1)")
+
+    def test_executemany_java_exception_is_translated(self):
+        import jpype
+        from wbjdbc.exceptions import OperationalError
+
+        class FakeSQLException(jpype.JException):
+            def getSQLState(self):
+                return "08003"
+
+            def getErrorCode(self):
+                return -908
+
+        jc, pstmt = _make_java_conn()
+        pstmt.executeBatch.side_effect = FakeSQLException("connection closed")
+
+        cur = _cursor(jc)
+        with pytest.raises(OperationalError):
+            cur.executemany("INSERT INTO t VALUES (?)", [(1,), (2,)])
+
+
 class TestDirectCursorMetrics:
     def test_execute_records_query_metric(self):
         from wbjdbc.metrics import get_metrics_collector, reset_metrics
@@ -351,6 +420,151 @@ class TestDirectCursorMetrics:
 
         stats = get_metrics_collector().get_metrics()
         assert stats["batch_operations"] == 1
+
+
+class TestCallProc:
+    def test_builds_call_escape_syntax_with_placeholders(self):
+        jc = MagicMock()
+        cstmt = MagicMock()
+        cstmt.execute.return_value = False
+        cstmt.getUpdateCount.return_value = 0
+        jc.prepareCall.return_value = cstmt
+
+        cur = _cursor(jc)
+        cur.callproc("my_proc", [1, "x"])
+
+        jc.prepareCall.assert_called_once_with("{call my_proc(?,?)}")
+
+    def test_no_params_no_placeholders(self):
+        jc = MagicMock()
+        cstmt = MagicMock()
+        cstmt.execute.return_value = False
+        cstmt.getUpdateCount.return_value = 0
+        jc.prepareCall.return_value = cstmt
+
+        cur = _cursor(jc)
+        cur.callproc("my_proc")
+
+        jc.prepareCall.assert_called_once_with("{call my_proc}")
+
+    def test_in_params_are_bound(self):
+        jc = MagicMock()
+        cstmt = MagicMock()
+        cstmt.execute.return_value = False
+        cstmt.getUpdateCount.return_value = 0
+        jc.prepareCall.return_value = cstmt
+
+        cur = _cursor(jc)
+        cur.callproc("my_proc", [42, "hello"])
+
+        cstmt.setString.assert_called_once_with(2, "hello")
+        args = cstmt.setLong.call_args[0]
+        assert args[0] == 1
+        assert int(args[1]) == 42
+
+    def test_no_result_set_uses_update_count(self):
+        jc = MagicMock()
+        cstmt = MagicMock()
+        cstmt.execute.return_value = False
+        cstmt.getUpdateCount.return_value = 7
+        jc.prepareCall.return_value = cstmt
+
+        cur = _cursor(jc)
+        cur.callproc("my_proc", [1])
+
+        assert cur.rowcount == 7
+        assert cur.description is None
+
+    def test_result_set_is_fetchable_like_a_select(self):
+        meta = _make_meta(["id", "name"])
+        rs = _make_rs(meta, [(1, "Alice")])
+
+        jc = MagicMock()
+        cstmt = MagicMock()
+        cstmt.execute.return_value = True
+        cstmt.getResultSet.return_value = rs
+        jc.prepareCall.return_value = cstmt
+
+        cur = _cursor(jc)
+        cur.callproc("my_proc")
+
+        assert cur.rowcount == 1
+        assert cur.fetchall() == [(1, "Alice")]
+
+    def test_out_param_is_returned(self):
+        jc = MagicMock()
+        cstmt = MagicMock()
+        cstmt.execute.return_value = False
+        cstmt.getUpdateCount.return_value = 0
+        cstmt.getObject.return_value = 42
+        jc.prepareCall.return_value = cstmt
+
+        cur = _cursor(jc)
+        result = cur.callproc("my_proc", [1, None], out_types={2: 4})
+
+        cstmt.registerOutParameter.assert_called_once_with(2, 4)
+        assert result == [42]
+
+    def test_inout_param_is_bound_and_registered(self):
+        jc = MagicMock()
+        cstmt = MagicMock()
+        cstmt.execute.return_value = False
+        cstmt.getUpdateCount.return_value = 0
+        cstmt.getObject.return_value = 99
+        jc.prepareCall.return_value = cstmt
+
+        cur = _cursor(jc)
+        result = cur.callproc("my_proc", [10], out_types={1: 4})
+
+        args = cstmt.setLong.call_args[0]
+        assert int(args[1]) == 10
+        cstmt.registerOutParameter.assert_called_once_with(1, 4)
+        assert result == [99]
+
+    def test_pure_out_param_beyond_params_length_gets_placeholder(self):
+        jc = MagicMock()
+        cstmt = MagicMock()
+        cstmt.execute.return_value = False
+        cstmt.getUpdateCount.return_value = 0
+        cstmt.getObject.return_value = "ok"
+        jc.prepareCall.return_value = cstmt
+
+        cur = _cursor(jc)
+        result = cur.callproc("my_proc", [1, 2], out_types={3: 12})
+
+        jc.prepareCall.assert_called_once_with("{call my_proc(?,?,?)}")
+        cstmt.registerOutParameter.assert_called_once_with(3, 12)
+        assert result == ["ok"]
+
+    def test_cstmt_closed_after_call(self):
+        jc = MagicMock()
+        cstmt = MagicMock()
+        cstmt.execute.return_value = False
+        cstmt.getUpdateCount.return_value = 0
+        jc.prepareCall.return_value = cstmt
+
+        cur = _cursor(jc)
+        cur.callproc("my_proc")
+
+        cstmt.close.assert_called_once()
+
+    def test_java_exception_is_translated(self):
+        import jpype
+        from wbjdbc.exceptions import ProgrammingError
+
+        class FakeSQLException(jpype.JException):
+            def getSQLState(self):
+                return "42000"
+
+            def getErrorCode(self):
+                return -1
+
+        jc = MagicMock()
+        jc.prepareCall.side_effect = FakeSQLException("no such procedure")
+
+        cur = _cursor(jc)
+        with pytest.raises(ProgrammingError):
+            cur.callproc("does_not_exist")
 
 
 class TestFetchDf:
@@ -469,6 +683,112 @@ class TestJ2P:
 
         result = _j2p(FakeTime())
         assert result == datetime.time(8, 15, 0)
+
+    def test_blob_materialized_to_bytes_by_default(self):
+        import jpype
+
+        class FakeBlob(jpype.java.sql.Blob):
+            def getClass(self):
+                m = MagicMock()
+                m.getName.return_value = "com.informix.jdbc.IfxLoBlob"
+                return m
+
+            def length(self):
+                return 5
+
+            def getBytes(self, pos, length):
+                return b"hello"[pos - 1:pos - 1 + length]
+
+        result = _j2p(FakeBlob())
+        assert result == b"hello"
+
+    def test_clob_materialized_to_str_by_default(self):
+        import jpype
+
+        class FakeClob(jpype.java.sql.Clob):
+            def getClass(self):
+                m = MagicMock()
+                m.getName.return_value = "com.informix.jdbc.IfxLoClob"
+                return m
+
+            def length(self):
+                return 5
+
+            def getSubString(self, pos, length):
+                return "world"[pos - 1:pos - 1 + length]
+
+        result = _j2p(FakeClob())
+        assert result == "world"
+
+    def test_blob_returns_lobhandle_when_streaming(self):
+        import jpype
+        from wbjdbc._types import LobHandle
+
+        class FakeBlob(jpype.java.sql.Blob):
+            def getClass(self):
+                m = MagicMock()
+                m.getName.return_value = "com.informix.jdbc.IfxLoBlob"
+                return m
+
+        result = _j2p(FakeBlob(), stream_lobs=True)
+        assert isinstance(result, LobHandle)
+
+    def test_empty_blob_read_returns_empty_bytes(self):
+        import jpype
+        from wbjdbc._types import LobHandle
+
+        class FakeBlob(jpype.java.sql.Blob):
+            def length(self):
+                return 0
+
+        handle = LobHandle(FakeBlob(), is_binary=True)
+        assert handle.read() == b""
+
+    def test_lobhandle_read_all(self):
+        from wbjdbc._types import LobHandle
+
+        class FakeBlob:
+            def length(self):
+                return 5
+
+            def getBytes(self, pos, length):
+                return b"hello"[pos - 1:pos - 1 + length]
+
+        handle = LobHandle(FakeBlob(), is_binary=True)
+        assert handle.read() == b"hello"
+
+    def test_lobhandle_stream_yields_chunks(self):
+        from wbjdbc._types import LobHandle
+
+        data = b"0123456789"
+
+        class FakeBlob:
+            def length(self):
+                return len(data)
+
+            def getBytes(self, pos, length):
+                return data[pos - 1:pos - 1 + length]
+
+        handle = LobHandle(FakeBlob(), is_binary=True)
+        chunks = list(handle.stream(chunk_size=3))
+        assert chunks == [b"012", b"345", b"678", b"9"]
+        assert b"".join(chunks) == data
+
+    def test_lobhandle_clob_stream_yields_str_chunks(self):
+        from wbjdbc._types import LobHandle
+
+        text = "abcdefghij"
+
+        class FakeClob:
+            def length(self):
+                return len(text)
+
+            def getSubString(self, pos, length):
+                return text[pos - 1:pos - 1 + length]
+
+        handle = LobHandle(FakeClob(), is_binary=False)
+        chunks = list(handle.stream(chunk_size=4))
+        assert "".join(chunks) == text
 
 
 class TestSetParam:

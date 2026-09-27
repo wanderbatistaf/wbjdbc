@@ -229,6 +229,286 @@ class TestPoolCapacity:
         assert pool.stats()["active"] == 0
 
 
+class TestConnectionRetry:
+    def _build(self, side_effect, max_retries, mock_jpype):
+        from wbjdbc import ConnectionPool
+
+        mock_jpype.JClass = MagicMock()
+        mock_jpype.java.sql.DriverManager.getConnection.side_effect = side_effect
+
+        pool = ConnectionPool(
+            jdbc_url="jdbc:test://localhost/testdb",
+            driver_class="com.example.Driver",
+            jars=[],
+            user="user",
+            password="pass",
+            pool_size=0,  # no background prewarm consuming side_effect
+            max_overflow=5,
+            checkout_timeout=5,
+            max_retries=max_retries,
+            retry_delay=0,
+        )
+        pool._prewarm_done.wait(timeout=1.0)
+        return pool
+
+    def test_succeeds_after_transient_failures(self):
+        from wbjdbc import _PooledConn
+        from wbjdbc.metrics import get_metrics_collector, reset_metrics
+
+        reset_metrics()
+        mock_jconn = _mock_jconn()
+        mock_jpype = MagicMock()
+
+        with patch("wbjdbc.start_jvm"), patch("wbjdbc._get_jpype", return_value=mock_jpype):
+            pool = self._build([Exception("blip1"), Exception("blip2"), mock_jconn], 3, mock_jpype)
+            conn = pool._new_conn()
+
+        assert isinstance(conn, _PooledConn)
+        assert mock_jpype.java.sql.DriverManager.getConnection.call_count == 3
+        assert get_metrics_collector().get_metrics()["reconnects"] == 1
+
+    def test_exhausts_retries_and_raises(self):
+        mock_jpype = MagicMock()
+
+        with patch("wbjdbc.start_jvm"), patch("wbjdbc._get_jpype", return_value=mock_jpype):
+            pool = self._build(Exception("db is down"), 2, mock_jpype)
+            with pytest.raises(Exception, match="db is down"):
+                pool._new_conn()
+
+        assert mock_jpype.java.sql.DriverManager.getConnection.call_count == 3
+
+    def test_no_retry_by_default_fails_immediately(self):
+        mock_jpype = MagicMock()
+
+        with patch("wbjdbc.start_jvm"), patch("wbjdbc._get_jpype", return_value=mock_jpype):
+            pool = self._build(Exception("nope"), 0, mock_jpype)
+            with pytest.raises(Exception, match="nope"):
+                pool._new_conn()
+
+        assert mock_jpype.java.sql.DriverManager.getConnection.call_count == 1
+
+
+class TestSslParams:
+    def test_mysql_ssl_verify(self):
+        from wbjdbc import _apply_ssl_params
+
+        url = _apply_ssl_params("mysql", "jdbc:mysql://h:3306/db", ssl_verify=True)
+        assert url == "jdbc:mysql://h:3306/db?sslMode=VERIFY_CA"
+
+    def test_mysql_ssl_no_verify(self):
+        from wbjdbc import _apply_ssl_params
+
+        url = _apply_ssl_params("mysql", "jdbc:mysql://h:3306/db", ssl_verify=False)
+        assert url == "jdbc:mysql://h:3306/db?sslMode=REQUIRED"
+
+    def test_postgresql_ssl_verify(self):
+        from wbjdbc import _apply_ssl_params
+
+        url = _apply_ssl_params("postgresql", "jdbc:postgresql://h:5432/db", ssl_verify=True)
+        assert url == "jdbc:postgresql://h:5432/db?ssl=true&sslmode=verify-full"
+
+    def test_postgresql_ssl_no_verify(self):
+        from wbjdbc import _apply_ssl_params
+
+        url = _apply_ssl_params("postgresql", "jdbc:postgresql://h:5432/db", ssl_verify=False)
+        assert url == "jdbc:postgresql://h:5432/db?ssl=true&sslmode=require"
+
+    def test_informix_ssl(self):
+        from wbjdbc import _apply_ssl_params
+
+        url = _apply_ssl_params(
+            "informix-sqli", "jdbc:informix-sqli://h:1526/db:INFORMIXSERVER=s", ssl_verify=True
+        )
+        assert url == "jdbc:informix-sqli://h:1526/db:INFORMIXSERVER=s;SECURITY=SSL"
+
+    def test_unknown_db_type_returns_url_unchanged(self):
+        from wbjdbc import _apply_ssl_params
+
+        url = _apply_ssl_params("oracle", "jdbc:oracle://h:1521/db", ssl_verify=True)
+        assert url == "jdbc:oracle://h:1521/db"
+
+    def test_appends_with_ampersand_when_query_string_already_present(self):
+        from wbjdbc import _apply_ssl_params
+
+        url = _apply_ssl_params("mysql", "jdbc:mysql://h:3306/db?useUnicode=true", ssl_verify=True)
+        assert url == "jdbc:mysql://h:3306/db?useUnicode=true&sslMode=VERIFY_CA"
+
+
+class TestEnsureJvmStarted:
+    def test_noop_when_jvm_already_started(self):
+        from wbjdbc import ensure_jvm_started
+
+        mock_jpype = MagicMock()
+        mock_jpype.isJVMStarted.return_value = True
+        with patch("wbjdbc._get_jpype", return_value=mock_jpype), \
+             patch("wbjdbc.start_jvm") as mock_start:
+            ensure_jvm_started("informix-sqli")
+
+        mock_start.assert_not_called()
+
+    def test_starts_jvm_with_resolved_jar_when_not_started(self):
+        from wbjdbc import ensure_jvm_started, DEFAULT_DRIVERS
+
+        mock_jpype = MagicMock()
+        mock_jpype.isJVMStarted.return_value = False
+        with patch("wbjdbc._get_jpype", return_value=mock_jpype), \
+             patch("wbjdbc.start_jvm") as mock_start:
+            ensure_jvm_started("mysql")
+
+        mock_start.assert_called_once_with([DEFAULT_DRIVERS["mysql"]["jar"]], db_type="mysql")
+
+    def test_accepts_legacy_integer_db_type(self):
+        from wbjdbc import ensure_jvm_started, DEFAULT_DRIVERS
+
+        mock_jpype = MagicMock()
+        mock_jpype.isJVMStarted.return_value = False
+        with patch("wbjdbc._get_jpype", return_value=mock_jpype), \
+             patch("wbjdbc.start_jvm") as mock_start:
+            ensure_jvm_started(1)  # 1 -> informix-sqli
+
+        mock_start.assert_called_once_with(
+            [DEFAULT_DRIVERS["informix-sqli"]["jar"]], db_type="informix-sqli"
+        )
+
+    def test_unknown_db_type_starts_jvm_without_extra_jar(self):
+        from wbjdbc import ensure_jvm_started
+
+        mock_jpype = MagicMock()
+        mock_jpype.isJVMStarted.return_value = False
+        with patch("wbjdbc._get_jpype", return_value=mock_jpype), \
+             patch("wbjdbc.start_jvm") as mock_start:
+            ensure_jvm_started(None)
+
+        mock_start.assert_called_once_with(None, db_type=None)
+
+
+class TestGetProcedureSource:
+    def _rs_for_rows(self, cols, rows):
+        rs = MagicMock()
+        meta = MagicMock()
+        meta.getColumnCount.return_value = len(cols)
+        meta.getColumnLabel.side_effect = lambda i: cols[i - 1]
+        meta.getColumnType.return_value = 12
+        rs.getMetaData.return_value = meta
+        row_iter = iter(rows)
+        current = [None]
+
+        def _next():
+            try:
+                current[0] = next(row_iter)
+                return True
+            except StopIteration:
+                return False
+
+        rs.next.side_effect = _next
+        rs.getObject.side_effect = lambda i: current[0][i - 1]
+        rs.getString.side_effect = lambda i: current[0][i - 1]
+        return rs
+
+    def _pool_conn(self, db_type):
+        pool = _build_pool(pool_size=1)
+        conn = pool.acquire()
+        conn._db_type = db_type
+        conn._database = "testdb"
+        return conn
+
+    def test_informix_concatenates_chunks_in_order(self):
+        from wbjdbc.cache import reset_cache
+
+        reset_cache()
+        conn = self._pool_conn("informix-sqli")
+        rs = self._rs_for_rows(["data"], [("CREATE PROCEDURE p()\n",), ("  RETURN 1;\nEND PROCEDURE",)])
+        pstmt = MagicMock()
+        pstmt.executeQuery.return_value = rs
+        conn._jc.prepareStatement.return_value = pstmt
+
+        source = conn.get_procedure_source("p")
+
+        assert source == "CREATE PROCEDURE p()\n  RETURN 1;\nEND PROCEDURE"
+
+    def test_informix_not_found_returns_none(self):
+        from wbjdbc.cache import reset_cache
+
+        reset_cache()
+        conn = self._pool_conn("informix-sqli")
+        rs = self._rs_for_rows(["data"], [])
+        pstmt = MagicMock()
+        pstmt.executeQuery.return_value = rs
+        conn._jc.prepareStatement.return_value = pstmt
+
+        assert conn.get_procedure_source("does_not_exist") is None
+
+    def test_mysql_extracts_create_procedure_column(self):
+        from wbjdbc.cache import reset_cache
+
+        reset_cache()
+        conn = self._pool_conn("mysql")
+        row = ("p", "", "CREATE PROCEDURE p() BEGIN SELECT 1; END", "utf8mb4", "x", "y")
+        rs = self._rs_for_rows(["Procedure", "sql_mode", "Create Procedure", "a", "b", "c"], [row])
+        pstmt = MagicMock()
+        pstmt.executeQuery.return_value = rs
+        conn._jc.prepareStatement.return_value = pstmt
+
+        source = conn.get_procedure_source("p")
+
+        assert source == "CREATE PROCEDURE p() BEGIN SELECT 1; END"
+        conn._jc.prepareStatement.assert_called_once_with("SHOW CREATE PROCEDURE p")
+
+    def test_postgresql_returns_functiondef(self):
+        from wbjdbc.cache import reset_cache
+
+        reset_cache()
+        conn = self._pool_conn("postgresql")
+        rs = self._rs_for_rows(["pg_get_functiondef"], [("CREATE PROCEDURE p() LANGUAGE plpgsql AS $$ BEGIN END $$",)])
+        pstmt = MagicMock()
+        pstmt.executeQuery.return_value = rs
+        conn._jc.prepareStatement.return_value = pstmt
+
+        source = conn.get_procedure_source("p")
+
+        assert "CREATE PROCEDURE p()" in source
+
+    def test_postgresql_not_found_returns_none(self):
+        from wbjdbc.cache import reset_cache
+
+        reset_cache()
+        conn = self._pool_conn("postgresql")
+        rs = self._rs_for_rows(["pg_get_functiondef"], [])
+        pstmt = MagicMock()
+        pstmt.executeQuery.return_value = rs
+        conn._jc.prepareStatement.return_value = pstmt
+
+        assert conn.get_procedure_source("does_not_exist") is None
+
+    def test_unsupported_db_type_raises_not_supported_error(self):
+        from wbjdbc.exceptions import NotSupportedError
+
+        conn = self._pool_conn("oracle")
+        with pytest.raises(NotSupportedError):
+            conn.get_procedure_source("p")
+
+    def test_invalid_proc_name_raises_value_error(self):
+        conn = self._pool_conn("mysql")
+        with pytest.raises(ValueError):
+            conn.get_procedure_source("p(); DROP TABLE x; --")
+
+    def test_result_is_cached(self):
+        from wbjdbc.cache import reset_cache
+
+        reset_cache()
+        conn = self._pool_conn("informix-sqli")
+        rs = self._rs_for_rows(["data"], [("CREATE PROCEDURE p() RETURN 1; END PROCEDURE",)])
+        pstmt = MagicMock()
+        pstmt.executeQuery.return_value = rs
+        conn._jc.prepareStatement.return_value = pstmt
+
+        first = conn.get_procedure_source("p")
+        second = conn.get_procedure_source("p")
+
+        assert first == second
+        assert conn._jc.prepareStatement.call_count == 1
+
+
 class TestGetTableColumns:
     def _rs_for_columns(self, rows):
         rs = MagicMock()
@@ -318,6 +598,91 @@ class TestExecuteBatchChunking:
 
         assert total == 3
         assert pool._mock_jconn.commit.call_count >= 3
+
+
+class TestSavepoints:
+    def test_savepoint_without_name(self):
+        pool = _build_pool(pool_size=1)
+        conn = pool.acquire()
+        sp = MagicMock()
+        conn._jc.setSavepoint.return_value = sp
+
+        result = conn.savepoint()
+
+        conn._jc.setSavepoint.assert_called_once_with()
+        assert result is sp
+
+    def test_savepoint_with_name(self):
+        pool = _build_pool(pool_size=1)
+        conn = pool.acquire()
+        sp = MagicMock()
+        conn._jc.setSavepoint.return_value = sp
+
+        result = conn.savepoint("sp1")
+
+        conn._jc.setSavepoint.assert_called_once_with("sp1")
+        assert result is sp
+
+    def test_rollback_to_calls_connection_rollback_with_savepoint(self):
+        pool = _build_pool(pool_size=1)
+        conn = pool.acquire()
+        sp = MagicMock()
+
+        conn.rollback_to(sp)
+
+        conn._jc.rollback.assert_called_once_with(sp)
+
+    def test_release_savepoint(self):
+        pool = _build_pool(pool_size=1)
+        conn = pool.acquire()
+        sp = MagicMock()
+
+        conn.release_savepoint(sp)
+
+        conn._jc.releaseSavepoint.assert_called_once_with(sp)
+
+    def test_savepoint_scope_releases_on_success(self):
+        pool = _build_pool(pool_size=1)
+        conn = pool.acquire()
+        sp = MagicMock()
+        conn._jc.setSavepoint.return_value = sp
+
+        with conn.savepoint_scope("sp1"):
+            pass
+
+        conn._jc.releaseSavepoint.assert_called_once_with(sp)
+        conn._jc.rollback.assert_not_called()
+
+    def test_savepoint_scope_rolls_back_on_exception(self):
+        pool = _build_pool(pool_size=1)
+        conn = pool.acquire()
+        sp = MagicMock()
+        conn._jc.setSavepoint.return_value = sp
+
+        with pytest.raises(ValueError):
+            with conn.savepoint_scope("sp1"):
+                raise ValueError("boom")
+
+        conn._jc.rollback.assert_called_once_with(sp)
+        conn._jc.releaseSavepoint.assert_not_called()
+
+
+class TestPooledConnCallproc:
+    def test_delegates_to_cursor_callproc(self):
+        pool = _build_pool(pool_size=1)
+        conn = pool.acquire()
+
+        with patch.object(conn._jc, "prepareCall") as prep:
+            cstmt = MagicMock()
+            cstmt.execute.return_value = False
+            cstmt.getUpdateCount.return_value = 0
+            cstmt.getObject.return_value = 5
+            prep.return_value = cstmt
+
+            result = conn.callproc("my_proc", [1], out_types={1: 4})
+
+        prep.assert_called_once_with("{call my_proc(?)}")
+        assert result == [5]
 
 
 class TestPoolClose:
