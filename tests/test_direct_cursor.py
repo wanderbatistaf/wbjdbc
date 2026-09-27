@@ -309,6 +309,75 @@ class TestNamedParams:
         assert cur.rowcount == 1
 
 
+class TestDirectCursorExceptionTranslation:
+    def test_java_exception_during_prepare_is_translated(self):
+        """prepareStatement() failures (bad table/syntax) must be translated too,
+        not just failures from executeQuery/executeUpdate."""
+        import jpype
+        from wbjdbc.exceptions import ProgrammingError
+
+        class FakeSQLException(jpype.JException):
+            def getSQLState(self):
+                return "42000"
+
+            def getErrorCode(self):
+                return -201
+
+        jc = MagicMock()
+        jc.prepareStatement.side_effect = FakeSQLException("syntax error")
+
+        cur = _cursor(jc)
+        with pytest.raises(ProgrammingError) as exc_info:
+            cur.execute("SELECT * FROM")
+
+        assert exc_info.value.sqlstate == "42000"
+        assert exc_info.value.sqlcode == -201
+
+    def test_java_exception_during_execute_is_translated(self):
+        import jpype
+        from wbjdbc.exceptions import IntegrityError
+
+        class FakeSQLException(jpype.JException):
+            def getSQLState(self):
+                return "23000"
+
+            def getErrorCode(self):
+                return -239
+
+        jc, pstmt = _make_java_conn(update_count=0)
+        pstmt.executeUpdate.side_effect = FakeSQLException("unique constraint")
+
+        cur = _cursor(jc)
+        with pytest.raises(IntegrityError):
+            cur.execute("INSERT INTO t VALUES (1)")
+
+    def test_non_java_exception_passes_through_unchanged(self):
+        jc, pstmt = _make_java_conn(update_count=0)
+        pstmt.executeUpdate.side_effect = ValueError("some python bug")
+
+        cur = _cursor(jc)
+        with pytest.raises(ValueError, match="some python bug"):
+            cur.execute("INSERT INTO t VALUES (1)")
+
+    def test_executemany_java_exception_is_translated(self):
+        import jpype
+        from wbjdbc.exceptions import OperationalError
+
+        class FakeSQLException(jpype.JException):
+            def getSQLState(self):
+                return "08003"
+
+            def getErrorCode(self):
+                return -908
+
+        jc, pstmt = _make_java_conn()
+        pstmt.executeBatch.side_effect = FakeSQLException("connection closed")
+
+        cur = _cursor(jc)
+        with pytest.raises(OperationalError):
+            cur.executemany("INSERT INTO t VALUES (?)", [(1,), (2,)])
+
+
 class TestDirectCursorMetrics:
     def test_execute_records_query_metric(self):
         from wbjdbc.metrics import get_metrics_collector, reset_metrics
