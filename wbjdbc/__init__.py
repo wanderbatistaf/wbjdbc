@@ -8,6 +8,7 @@ import datetime
 import socket
 import warnings
 from collections import OrderedDict
+from contextlib import contextmanager
 from .jvm import start_jvm
 import jaydebeapi
 
@@ -19,7 +20,7 @@ from .pool import get_pool, close_all_pools
 from .cache import get_schema_cache, reset_cache
 from .types import TypeMapper, JDBC_TYPES
 from .optimized import OptimizedJDBCConnection, OptimizedJDBCCursor
-from ._types import _j2p, _set_param, _rewrite_named, _SENSITIVE
+from ._types import _j2p, _set_param, _rewrite_named, _SENSITIVE, LobHandle
 from .exceptions import (
     Error, InterfaceError, DatabaseError, DataError, OperationalError,
     IntegrityError, InternalError, ProgrammingError, NotSupportedError,
@@ -46,7 +47,7 @@ DEFAULT_DRIVERS = {
 }
 
 # Version
-__version__ = "2.2.0"
+__version__ = "2.3.0"
 version = __version__
 
 _STMT_CACHE_SIZE = 20
@@ -106,7 +107,7 @@ class _DirectCursor:
         self._stmt_cache[sql] = pstmt
         return pstmt
 
-    def execute(self, sql, params=None):
+    def execute(self, sql, params=None, stream_lobs=False):
         if isinstance(params, dict):
             sql, params = _rewrite_named(sql, params)
         t0 = time.monotonic()
@@ -132,7 +133,7 @@ class _DirectCursor:
                 self._rows = []
                 while rs.next():
                     self._rows.append(
-                        tuple(_j2p(rs.getObject(i), daf) for i in range(1, n + 1))
+                        tuple(_j2p(rs.getObject(i), daf, stream_lobs) for i in range(1, n + 1))
                     )
                 rs.close()
                 self.rowcount = len(self._rows)
@@ -186,6 +187,92 @@ class _DirectCursor:
             metrics.record_query(sql, elapsed, success=success)
             metrics.record_batch_operation(len(params_list))
 
+    def callproc(self, proc_name, params=None, out_types=None):
+        """
+        Call a stored procedure via JDBC's CallableStatement.
+
+        Args:
+            proc_name: procedure name
+            params: positional values for IN/INOUT parameters, in call order. A pure
+                OUT parameter with no earlier IN value can either be omitted (if it's
+                the last position(s)) or passed as None.
+            out_types: optional dict {1-based position: java.sql.Types constant, see
+                wbjdbc.types.JDBC_TYPES} marking OUT/INOUT parameters. A position with
+                a non-None value in `params` is treated as INOUT (its value is sent
+                before the call); with None (or omitted), as pure OUT.
+
+        Returns:
+            List of the resulting values for the positions in out_types, in position
+            order, converted via _j2p. Empty list if out_types wasn't given. Any
+            result set the procedure returns is fetched normally via
+            fetchone()/fetchall()/fetchdh() afterwards, same as a SELECT.
+
+        Note: unlike execute()/executemany(), the CallableStatement here is not
+        cached (a fresh one is prepared and closed per call) - procedure calls aren't
+        the hot path the statement cache targets, and this keeps OUT parameter
+        registration simple.
+        """
+        params = list(params) if params else []
+        out_types = out_types or {}
+        total = max(len(params), max(out_types.keys(), default=0))
+        placeholders = ",".join(["?"] * total)
+        sql = f"{{call {proc_name}({placeholders})}}" if total else f"{{call {proc_name}}}"
+
+        t0 = time.monotonic()
+        success = True
+        cstmt = None
+        try:
+            cstmt = self._jc.prepareCall(sql)
+            if self._query_timeout_sec:
+                cstmt.setQueryTimeout(self._query_timeout_sec)
+            for i, v in enumerate(params, 1):
+                if v is not None or i not in out_types:
+                    _set_param(cstmt, i, v)
+            for pos, sql_type in out_types.items():
+                cstmt.registerOutParameter(pos, sql_type)
+
+            has_result_set = cstmt.execute()
+            if has_result_set:
+                rs = cstmt.getResultSet()
+                meta = rs.getMetaData()
+                n = meta.getColumnCount()
+                self._cols = [meta.getColumnLabel(i) for i in range(1, n + 1)]
+                self.description = tuple(
+                    (meta.getColumnLabel(i), meta.getColumnType(i), None, None, None, None, None)
+                    for i in range(1, n + 1)
+                )
+                daf = self._decimal_as_float
+                self._rows = []
+                while rs.next():
+                    self._rows.append(
+                        tuple(_j2p(rs.getObject(i), daf) for i in range(1, n + 1))
+                    )
+                rs.close()
+                self.rowcount = len(self._rows)
+            else:
+                self._rows = []
+                self._cols = []
+                self.description = None
+                self.rowcount = cstmt.getUpdateCount()
+
+            return [
+                _j2p(cstmt.getObject(pos), self._decimal_as_float)
+                for pos in sorted(out_types)
+            ]
+        except Exception as e:
+            success = False
+            if is_java_exception(e):
+                raise translate_jdbc_exception(e) from e
+            raise
+        finally:
+            if cstmt is not None:
+                try:
+                    cstmt.close()
+                except Exception:
+                    pass
+            elapsed = time.monotonic() - t0
+            get_metrics_collector().record_query(f"CALL {proc_name}", elapsed, success=success)
+
     def fetchone(self):
         if self._rows:
             return self._rows.pop(0)
@@ -226,6 +313,7 @@ class _PooledConn:
         self._created_at = time.monotonic()
         self.pool_key = pool_key
         self._database = None
+        self._db_type = None
         self._stmt_cache = OrderedDict()
 
     def cursor(self):
@@ -291,6 +379,46 @@ class _PooledConn:
             self._executor = ThreadPoolExecutor(max_workers=10)
         return self._executor.submit(self.execute_query, sql, params)
 
+    def callproc(self, proc_name, params=None, out_types=None):
+        """Call a stored procedure. See _DirectCursor.callproc() for the full contract."""
+        cur = self.cursor()
+        return cur.callproc(proc_name, params, out_types)
+
+    def savepoint(self, name=None):
+        """Create a savepoint in the current transaction, returning an opaque handle
+        for rollback_to()/release_savepoint()."""
+        return self._jc.setSavepoint(name) if name else self._jc.setSavepoint()
+
+    def rollback_to(self, savepoint):
+        """Roll back the current transaction to a savepoint (without ending it).
+
+        Not a real undo button - it's still the same transaction, just pretending
+        the last part didn't happen. Manage your expectations accordingly.
+        """
+        self._jc.rollback(savepoint)
+
+    def release_savepoint(self, savepoint):
+        """Release a savepoint, once it's no longer needed."""
+        self._jc.releaseSavepoint(savepoint)
+
+    @contextmanager
+    def savepoint_scope(self, name=None):
+        """Context manager: create a savepoint, release it on success, roll back to
+        it (re-raising) on exception - without aborting the whole transaction.
+
+            with conn.savepoint_scope():
+                cur.execute("INSERT INTO t VALUES (?)", (1,))
+                # if this raises, only the INSERT above is undone, not the whole
+                # transaction; the exception still propagates
+        """
+        sp = self.savepoint(name)
+        try:
+            yield sp
+            self.release_savepoint(sp)
+        except Exception:
+            self.rollback_to(sp)
+            raise
+
     def get_table_columns(self, table):
         """Return column metadata for table (name, type, type_name, size, nullable), using the schema cache."""
         schema_cache = get_schema_cache()
@@ -318,6 +446,96 @@ class _PooledConn:
 
         schema_cache.set_columns(database, table, columns)
         return columns
+
+    def get_procedure_source(self, proc_name):
+        """
+        Return the CREATE PROCEDURE/FUNCTION source text for proc_name, or None if it
+        doesn't exist. Works for informix-sqli, mysql and postgresql - dispatches on
+        the db_type this connection was opened with. Cached via the schema cache,
+        same as get_table_columns().
+
+        Note (postgresql): if there are multiple overloaded procedures/functions with
+        this name, only one (arbitrary) definition is returned - pg_proc doesn't key
+        by name alone.
+
+        Note (informix-sqli): sysprocbody stores the source text pre-chopped into
+        rows of a few thousand bytes each, ordered by seqno, because someone in the
+        90s decided that's how you store a string. We just tape it back together.
+        """
+        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", proc_name):
+            raise ValueError(f"Invalid procedure name: {proc_name!r}")
+
+        schema_cache = get_schema_cache()
+        database = self._database or ""
+        cached = schema_cache.get_procedure_source(database, proc_name)
+        if cached is not None:
+            return cached
+
+        if self._db_type not in ("informix-sqli", "mysql", "postgresql"):
+            raise NotSupportedError(
+                f"get_procedure_source() is not implemented for db_type={self._db_type!r}"
+            )
+
+        cur = self.cursor()
+        source = None
+        try:
+            if self._db_type == "informix-sqli":
+                # Deliberately bypasses cur.execute()/_j2p here: sysprocbody.data is a
+                # fixed-width CHAR column split across one row per ~256-byte chunk, and
+                # _j2p's str(obj).strip() (there to drop CHAR(n) padding on ordinary
+                # columns) would strip whitespace off BOTH ends of every chunk before
+                # they're joined - eating real newlines/indentation that happen to land
+                # on a chunk boundary and silently welding two source lines together
+                # (e.g. "then return" -> "thenreturn"). Read the raw strings straight off
+                # the JDBC ResultSet instead, concatenate untouched, and only rstrip()
+                # the final result once, to drop the real CHAR padding on the last chunk.
+                pstmt = self._jc.prepareStatement(
+                    "SELECT b.data FROM sysprocbody b, sysprocedures p "
+                    "WHERE b.procid = p.procid AND p.procname = ? AND b.datakey = 'T' "
+                    "ORDER BY b.seqno"
+                )
+                try:
+                    pstmt.setString(1, proc_name)
+                    rs = pstmt.executeQuery()
+                    chunks = []
+                    try:
+                        while rs.next():
+                            chunks.append(str(rs.getString(1)))
+                    finally:
+                        rs.close()
+                finally:
+                    pstmt.close()
+                if chunks:
+                    source = "".join(chunks).rstrip()
+            elif self._db_type == "mysql":
+                # SHOW CREATE PROCEDURE doesn't accept bind parameters - proc_name is
+                # validated as a plain identifier above before this interpolation.
+                cur.execute(f"SHOW CREATE PROCEDURE {proc_name}")
+                row = cur.fetchone()
+                if row:
+                    source = row[2]
+            elif self._db_type == "postgresql":
+                cur.execute(
+                    "SELECT pg_get_functiondef(p.oid) FROM pg_proc p "
+                    "WHERE p.proname = ? LIMIT 1",
+                    (proc_name,),
+                )
+                row = cur.fetchone()
+                if row:
+                    source = row[0]
+        except Exception as e:
+            # The mysql/postgresql branches go through cur.execute(), which already
+            # translates Java exceptions into DatabaseError subclasses; the
+            # informix-sqli branch above talks to JDBC directly, so translate here too.
+            if is_java_exception(e):
+                e = translate_jdbc_exception(e)
+            if isinstance(e, DatabaseError):
+                return None
+            raise
+
+        if source is not None:
+            schema_cache.set_procedure_source(database, proc_name, source)
+        return source
 
     def commit(self):
         self._jc.commit()
@@ -719,6 +937,11 @@ def ensure_jvm_started(db_type=None):
     event loop (normally the main thread) instead of inside the worker thread.
 
     Safe to call redundantly - it's a no-op if the JVM is already started.
+
+    Found this one the hard way: everything imports fine, everything runs fine,
+    and then the process just... never exits. No traceback, no error, just a
+    terminal that quietly refuses to give you your prompt back. Ask me how long
+    that took to track down.
     """
     jpype = _get_jpype()
     if jpype.isJVMStarted():
@@ -856,6 +1079,7 @@ def connect_optimized(
         conn = _PooledConn(jconn, None)
 
     conn._database = database
+    conn._db_type = db_type
 
     if isolation_level in ("DIRTY_READ", "READ_UNCOMMITTED") and db_type == "informix-sqli":
         try:
@@ -901,6 +1125,7 @@ __all__ = [
     "reset_cache",
     "TypeMapper",
     "JDBC_TYPES",
+    "LobHandle",
 
     # DB-API 2.0 exception hierarchy
     "Error",

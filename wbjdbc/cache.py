@@ -192,6 +192,42 @@ class SchemaCache:
         """Create cache key for column metadata."""
         return f"columns:{database}:{table}"
 
+    def _make_procedure_key(self, database: str, proc_name: str) -> str:
+        """Create cache key for procedure source."""
+        return f"procedure:{database}:{proc_name}"
+
+    def get_procedure_source(self, database: str, proc_name: str) -> Optional[str]:
+        """
+        Get cached stored procedure/function source text.
+
+        Args:
+            database: Database name
+            proc_name: Procedure name
+
+        Returns:
+            Procedure source text or None
+        """
+        if not self.enabled:
+            return None
+
+        key = self._make_procedure_key(database, proc_name)
+        return self.cache.get(key)
+
+    def set_procedure_source(self, database: str, proc_name: str, source: str):
+        """
+        Cache stored procedure/function source text.
+
+        Args:
+            database: Database name
+            proc_name: Procedure name
+            source: Procedure source text
+        """
+        if not self.enabled:
+            return
+
+        key = self._make_procedure_key(database, proc_name)
+        self.cache.set(key, source)
+
     def get_table_metadata(self, database: str, table: str) -> Optional[Dict[str, Any]]:
         """
         Get cached table metadata.
@@ -255,6 +291,20 @@ class SchemaCache:
 
         key = self._make_columns_key(database, table)
         self.cache.set(key, columns)
+
+    def invalidate_procedure(self, database: str, proc_name: str):
+        """
+        Invalidate cached source for a stored procedure/function.
+
+        Args:
+            database: Database name
+            proc_name: Procedure name
+        """
+        if not self.enabled:
+            return
+
+        self.cache.invalidate(self._make_procedure_key(database, proc_name))
+        self.logger.info(f"Invalidated cache for procedure {database}.{proc_name}")
 
     def invalidate_table(self, database: str, table: str):
         """

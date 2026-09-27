@@ -16,6 +16,9 @@
   - [SSL/TLS](#ssltls)
   - [Exceptions (DB-API 2.0)](#exceptions-db-api-20)
   - [Real Async Support](#real-async-support)
+  - [Stored Procedures](#stored-procedures)
+  - [LOB (BLOB/CLOB) Handling](#lob-blobclob-handling)
+  - [Savepoints](#savepoints)
   - [Metrics & Logging](#metrics--logging)
 - [Configuration](#configuration)
 - [Performance Targets](#performance-targets)
@@ -621,6 +624,102 @@ async def main():
 `AsyncConnection`/`AsyncCursor` (in `wbjdbc/aio.py`) are thin wrappers around the same
 `_PooledConn`/`_DirectCursor` core `connect_optimized()` uses - no JDBC logic is
 duplicated.
+
+---
+
+### Stored Procedures
+
+`cursor.callproc()` calls a stored procedure via JDBC's `CallableStatement` -
+something the library had no way to do before. Handles IN, OUT and INOUT parameters,
+and any result set the procedure returns is fetched afterwards exactly like a SELECT
+(`fetchone()`/`fetchall()`/`fetchdh()`).
+
+**Usage:**
+
+```python
+from wbjdbc.types import JDBC_TYPES  # java.sql.Types constants
+
+cursor = conn.cursor()
+
+# OUT parameter: PROCEDURE total_for_customer(IN id, OUT total)
+out_values = cursor.callproc(
+    "total_for_customer",
+    [42, None],                      # params: id=42, total=placeholder (OUT)
+    out_types={2: JDBC_TYPES['DECIMAL']},  # position 2 is OUT, type DECIMAL
+)
+print(out_values[0])  # the resulting total
+
+# INOUT parameter: value is sent, then overwritten by the procedure
+out_values = cursor.callproc("adjust_and_report", [100], out_types={1: JDBC_TYPES['INTEGER']})
+
+# Procedure returning a result set
+cursor.callproc("list_active_customers")
+for row in cursor.fetchdh():
+    print(row)
+```
+
+`conn.callproc(...)` (on the connection object, not just the cursor) is also
+available and mirrors `execute_query()`/`execute_batch()`.
+
+**Notes:**
+- A position appears in `out_types` when it's OUT or INOUT; a `None` value in
+  `params` (or a position past the end of `params`) means pure OUT, a non-`None`
+  value means INOUT.
+- Unlike `execute()`, the `CallableStatement` is **not** cached (a fresh one is
+  prepared and closed per call) - procedure calls aren't the statement-cache's hot
+  path, and this keeps OUT parameter registration simple and correct.
+
+---
+
+### LOB (BLOB/CLOB) Handling
+
+By default, `BLOB`/`CLOB` columns are materialized to `bytes`/`str`. `Blob`/`Clob` are
+JDBC *interfaces*, so unlike every other type conversion in `_j2p()`, they're detected
+via an `isinstance` check against the interface rather than by concrete class name
+(which varies by driver).
+
+For large objects, pass `stream_lobs=True` to `execute()` to get a `LobHandle`
+instead of the fully-materialized value, and read it in chunks:
+
+```python
+cursor.execute("SELECT id, document FROM documents WHERE id = ?", (1,), stream_lobs=True)
+doc_id, document = cursor.fetchone()
+
+with open(f"document_{doc_id}.bin", "wb") as f:
+    for chunk in document.stream(chunk_size=64 * 1024):
+        f.write(chunk)
+document.close()
+
+# or read it all at once:
+data = document.read()
+```
+
+**Note:** per the JDBC `Blob`/`Clob` spec, the LOB locator remains valid for the
+duration of the transaction in which it was created, regardless of whether the
+`ResultSet` it came from has since been closed - so a `LobHandle` can safely be read
+any time before the connection's next `commit()`/`rollback()`.
+
+---
+
+### Savepoints
+
+Partial rollback within a transaction, without aborting the whole thing:
+
+```python
+cursor.execute("INSERT INTO orders (id, status) VALUES (?, ?)", (1, "pending"))
+
+try:
+    with conn.savepoint_scope("before_risky_update"):
+        cursor.execute("UPDATE inventory SET qty = qty - 1 WHERE id = ?", (999,))
+        # if this raises, only the UPDATE above is undone - the INSERT above stays
+except IntegrityError:
+    print("risky update failed, rolled back to savepoint - order still stands")
+
+conn.commit()
+```
+
+Lower-level methods are also available: `conn.savepoint(name=None)`,
+`conn.rollback_to(savepoint)`, `conn.release_savepoint(savepoint)`.
 
 ---
 

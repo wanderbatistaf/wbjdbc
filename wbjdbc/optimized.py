@@ -154,6 +154,10 @@ class OptimizedJDBCConnection:
         """Get column information for a table (with caching)."""
         return self._core.get_table_columns(table)
 
+    def get_procedure_source(self, proc_name: str) -> Optional[str]:
+        """Get the CREATE PROCEDURE/FUNCTION source text (with caching)."""
+        return self._core.get_procedure_source(proc_name)
+
     def commit(self):
         """Commit the current transaction."""
         self._core.commit()

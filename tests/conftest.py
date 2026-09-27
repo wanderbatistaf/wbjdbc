@@ -34,6 +34,11 @@ def _build_jpype_stub():
             Date=object,
             Time=object,
             Timestamp=object,
+            Blob=type("Blob", (), {}),
+            Clob=type("Clob", (), {}),
+            Types=types.SimpleNamespace(
+                INTEGER=4, VARCHAR=12, DECIMAL=3, DATE=91, TIMESTAMP=93,
+            ),
             DriverManager=types.SimpleNamespace(
                 getConnection=lambda *a: None,
             ),
