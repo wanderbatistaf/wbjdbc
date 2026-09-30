@@ -47,7 +47,7 @@ DEFAULT_DRIVERS = {
 }
 
 # Version
-__version__ = "2.3.0"
+__version__ = "2.3.1"
 version = __version__
 
 _STMT_CACHE_SIZE = 20
@@ -447,7 +447,7 @@ class _PooledConn:
         schema_cache.set_columns(database, table, columns)
         return columns
 
-    def get_procedure_source(self, proc_name):
+    def get_procedure_source(self, proc_name, owner=None, numargs=None):
         """
         Return the CREATE PROCEDURE/FUNCTION source text for proc_name, or None if it
         doesn't exist. Works for informix-sqli, mysql and postgresql - dispatches on
@@ -461,13 +461,32 @@ class _PooledConn:
         Note (informix-sqli): sysprocbody stores the source text pre-chopped into
         rows of a few thousand bytes each, ordered by seqno, because someone in the
         90s decided that's how you store a string. We just tape it back together.
+        procname also isn't unique on its own, two separate ways:
+        - **different owners** can each have their own procedure under the same name
+          (`owner` disambiguates this one).
+        - **the same owner** can have several overloads of the same name that differ
+          only in parameter count (real overloading, same as any other language) -
+          `numargs` disambiguates this one, matching sysprocedures.numargs.
+        Left as None, either one falls back to the lowest procid match (one
+        consistent pick, same "arbitrary but not corrupted" contract as the
+        postgresql branch above) - never a blend of two different routines' chunks,
+        which is what happened here before this got these filters.
         """
         if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", proc_name):
             raise ValueError(f"Invalid procedure name: {proc_name!r}")
+        if owner is not None and not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", owner):
+            raise ValueError(f"Invalid owner: {owner!r}")
+        if numargs is not None and (not isinstance(numargs, int) or numargs < 0):
+            raise ValueError(f"Invalid numargs: {numargs!r}")
 
         schema_cache = get_schema_cache()
         database = self._database or ""
-        cached = schema_cache.get_procedure_source(database, proc_name)
+        cache_name = proc_name
+        if owner:
+            cache_name += f"@{owner}"
+        if numargs is not None:
+            cache_name += f"#{numargs}"
+        cached = schema_cache.get_procedure_source(database, cache_name)
         if cached is not None:
             return cached
 
@@ -489,22 +508,53 @@ class _PooledConn:
                 # (e.g. "then return" -> "thenreturn"). Read the raw strings straight off
                 # the JDBC ResultSet instead, concatenate untouched, and only rstrip()
                 # the final result once, to drop the real CHAR padding on the last chunk.
-                pstmt = self._jc.prepareStatement(
-                    "SELECT b.data FROM sysprocbody b, sysprocedures p "
-                    "WHERE b.procid = p.procid AND p.procname = ? AND b.datakey = 'T' "
-                    "ORDER BY b.seqno"
+                #
+                # Resolved in two steps rather than one query with a scalar subquery:
+                # Informix rejects FIRST/LIMIT/SKIP inside a subquery ("944: Cannot
+                # use 'first', 'limit' or 'skip' in this context"), so procid has to
+                # be pinned down first, then used to scope the sysprocbody read. That
+                # two-step pinning is what matters here - two routines that happen to
+                # share a name can never have their chunks interleaved into one
+                # garbled body, regardless of ORDER BY b.seqno matching both.
+                owner_clause = " AND owner = ?" if owner else ""
+                numargs_clause = " AND numargs = ?" if numargs is not None else ""
+                id_pstmt = self._jc.prepareStatement(
+                    "SELECT FIRST 1 procid FROM sysprocedures "
+                    f"WHERE procname = ?{owner_clause}{numargs_clause} ORDER BY procid"
                 )
                 try:
-                    pstmt.setString(1, proc_name)
-                    rs = pstmt.executeQuery()
-                    chunks = []
+                    pos = 1
+                    id_pstmt.setString(pos, proc_name)
+                    pos += 1
+                    if owner:
+                        id_pstmt.setString(pos, owner)
+                        pos += 1
+                    if numargs is not None:
+                        id_pstmt.setInt(pos, numargs)
+                    id_rs = id_pstmt.executeQuery()
                     try:
-                        while rs.next():
-                            chunks.append(str(rs.getString(1)))
+                        procid = int(id_rs.getInt(1)) if id_rs.next() else None
                     finally:
-                        rs.close()
+                        id_rs.close()
                 finally:
-                    pstmt.close()
+                    id_pstmt.close()
+
+                chunks = []
+                if procid is not None:
+                    pstmt = self._jc.prepareStatement(
+                        "SELECT data FROM sysprocbody WHERE procid = ? AND datakey = 'T' "
+                        "ORDER BY seqno"
+                    )
+                    try:
+                        pstmt.setInt(1, procid)
+                        rs = pstmt.executeQuery()
+                        try:
+                            while rs.next():
+                                chunks.append(str(rs.getString(1)))
+                        finally:
+                            rs.close()
+                    finally:
+                        pstmt.close()
                 if chunks:
                     source = "".join(chunks).rstrip()
             elif self._db_type == "mysql":
@@ -534,8 +584,62 @@ class _PooledConn:
             raise
 
         if source is not None:
-            schema_cache.set_procedure_source(database, proc_name, source)
+            schema_cache.set_procedure_source(database, cache_name, source)
         return source
+
+    def list_procedures(self):
+        """
+        List every stored procedure/function this connection can see, as
+        {"name", "owner", "numargs", "is_function"} dicts. Works for informix-sqli,
+        mysql and postgresql.
+
+        Deliberately does NOT try to filter out the database engine's own built-in
+        routines - there's no catalog column that does this reliably (see
+        OPTIMIZATION_GUIDE.md), so filtering by owner/schema naming convention is
+        left to the caller, who knows their own environment. Overloads (same name,
+        different numargs) are returned as separate entries, not deduplicated -
+        pass owner/numargs from here straight into get_procedure_source() to fetch
+        a specific one unambiguously (informix-sqli only; mysql doesn't support
+        overloading, and postgresql's get_procedure_source() picks one arbitrarily
+        when numargs isn't enough to disambiguate there too).
+        """
+        if self._db_type not in ("informix-sqli", "mysql", "postgresql"):
+            raise NotSupportedError(
+                f"list_procedures() is not implemented for db_type={self._db_type!r}"
+            )
+
+        cur = self.cursor()
+        if self._db_type == "informix-sqli":
+            cur.execute("SELECT procname, owner, numargs, isproc FROM sysprocedures")
+            return [
+                {
+                    "name": str(name).strip(),
+                    "owner": str(owner).strip() if owner else None,
+                    "numargs": int(numargs) if numargs is not None else None,
+                    "is_function": isproc != "t",
+                }
+                for name, owner, numargs, isproc in cur.fetchall()
+            ]
+        elif self._db_type == "mysql":
+            cur.execute(
+                "SELECT ROUTINE_NAME, ROUTINE_SCHEMA, ROUTINE_TYPE "
+                "FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = ?",
+                (self._database,),
+            )
+            return [
+                {"name": name, "owner": schema, "numargs": None, "is_function": rtype == "FUNCTION"}
+                for name, schema, rtype in cur.fetchall()
+            ]
+        else:  # postgresql
+            cur.execute(
+                "SELECT p.proname, n.nspname, p.pronargs, p.prokind "
+                "FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
+                "WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')"
+            )
+            return [
+                {"name": name, "owner": schema, "numargs": int(numargs), "is_function": kind == "f"}
+                for name, schema, numargs, kind in cur.fetchall()
+            ]
 
     def commit(self):
         self._jc.commit()
@@ -975,9 +1079,17 @@ def connect_optimized(
     ssl_verify=None,
     max_retries=None,
     retry_delay=None,
+    driver_jar=None,
     **kwargs
 ):
-    """Create an optimized JDBC connection using _DirectCursor (bypasses jaydebeapi global lock)."""
+    """Create an optimized JDBC connection using _DirectCursor (bypasses jaydebeapi global lock).
+
+    driver_jar: path to a JDBC driver jar to use instead of the one bundled with
+    wbjdbc (e.g. one pulled from your own internal artifact repository instead of
+    the copy shipped in wbjdbc/resources/maven/). Only replaces the main driver jar -
+    Informix's BSON companion jar (needed for JSON/BSON columns) still comes from the
+    bundled copy regardless.
+    """
     config = get_config(config_file)
 
     if ssl_enabled is None:
@@ -1027,7 +1139,12 @@ def connect_optimized(
 
     driver_cfg = DEFAULT_DRIVERS[db_type]
     resolved_port = port or driver_cfg["default_port"]
-    jar = driver_cfg["jar"]
+    if driver_jar is not None:
+        if not os.path.isfile(driver_jar):
+            raise ValueError(f"driver_jar not found: {driver_jar!r}")
+        jar = driver_jar
+    else:
+        jar = driver_cfg["jar"]
     driver_class = driver_cfg["driver_class"]
 
     if db_type == "informix-sqli":

@@ -2,6 +2,36 @@
 
 All notable changes to wbjdbc are documented here.
 
+## [2.3.1] - 2026-09-29
+
+### Fixed
+
+- **`get_procedure_source()` (informix-sqli)** - procedure names aren't unique in
+  Informix, in two separate ways: the same name can exist under different owners,
+  and the same owner can have several overloads of the same name differing only in
+  parameter count. The previous query filtered `sysprocbody`/`sysprocedures` by
+  `procname` alone, so routines sharing a name could have their source chunks
+  interleaved into one corrupted body. Now resolves to a single `procid` first
+  (optionally scoped by the new `owner` and `numargs` arguments) before reading any
+  `sysprocbody` row, so this can no longer happen. Left unspecified, either one
+  falls back to the lowest `procid` match, picked deterministically - same "pick
+  one, documented" contract the `postgresql` branch already had for overloaded
+  functions.
+
+### Added
+
+- **`connect_optimized(..., driver_jar=...)`** - use a JDBC driver jar from your own
+  path (e.g. an internal artifact repository) instead of the one bundled with
+  wbjdbc. Only replaces the main driver jar; Informix's BSON companion jar still
+  comes from the bundled copy.
+- **`list_procedures()`** - lists every stored procedure/function visible on the
+  connection (`informix-sqli`, `mysql`, `postgresql`), returning
+  `{"name", "owner", "numargs", "is_function"}` per routine. Deliberately doesn't
+  try to filter out the database engine's own built-in routines - there's no
+  catalog column that does this reliably - so that's left to the caller. Pass
+  `owner`/`numargs` from here straight into `get_procedure_source()` to fetch a
+  specific overload unambiguously.
+
 ## [2.3.0] - 2026-09-18
 
 ### Added

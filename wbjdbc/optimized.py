@@ -154,9 +154,15 @@ class OptimizedJDBCConnection:
         """Get column information for a table (with caching)."""
         return self._core.get_table_columns(table)
 
-    def get_procedure_source(self, proc_name: str) -> Optional[str]:
+    def get_procedure_source(
+        self, proc_name: str, owner: Optional[str] = None, numargs: Optional[int] = None
+    ) -> Optional[str]:
         """Get the CREATE PROCEDURE/FUNCTION source text (with caching)."""
-        return self._core.get_procedure_source(proc_name)
+        return self._core.get_procedure_source(proc_name, owner=owner, numargs=numargs)
+
+    def list_procedures(self) -> List[Dict[str, Any]]:
+        """List every stored procedure/function visible on this connection."""
+        return self._core.list_procedures()
 
     def commit(self):
         """Commit the current transaction."""

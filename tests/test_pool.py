@@ -288,6 +288,33 @@ class TestConnectionRetry:
         assert mock_jpype.java.sql.DriverManager.getConnection.call_count == 1
 
 
+class TestDriverJarOverride:
+    def test_missing_driver_jar_raises_value_error(self):
+        from wbjdbc import connect_optimized
+
+        with pytest.raises(ValueError, match="driver_jar not found"):
+            connect_optimized(
+                db_type="postgresql", host="h", database="d", user="u", password="p",
+                driver_jar="/no/such/driver.jar",
+            )
+
+    def test_valid_driver_jar_used_instead_of_bundled(self, tmp_path):
+        from wbjdbc import connect_optimized
+
+        custom_jar = tmp_path / "custom-postgres.jar"
+        custom_jar.write_bytes(b"not a real jar, just needs to exist on disk")
+
+        with patch("wbjdbc.start_jvm") as mock_start_jvm, \
+             patch("wbjdbc._get_jpype") as mock_get_jpype:
+            mock_get_jpype.return_value = MagicMock()
+            connect_optimized(
+                db_type="postgresql", host="h", database="d", user="u", password="p",
+                driver_jar=str(custom_jar), use_pool=False,
+            )
+
+        mock_start_jvm.assert_called_once_with([str(custom_jar)], db_type="postgresql")
+
+
 class TestSslParams:
     def test_mysql_ssl_verify(self):
         from wbjdbc import _apply_ssl_params
@@ -405,6 +432,30 @@ class TestGetProcedureSource:
         rs.getString.side_effect = lambda i: current[0][i - 1]
         return rs
 
+    def _id_rs(self, procid):
+        """Mock ResultSet for the procid-resolution query (SELECT FIRST 1 procid ...).
+        procid=None means no matching row (procedure/owner doesn't exist)."""
+        rs = MagicMock()
+        remaining = [procid is not None]
+
+        def _next():
+            if remaining[0]:
+                remaining[0] = False
+                return True
+            return False
+
+        rs.next.side_effect = _next
+        rs.getInt.return_value = procid
+        return rs
+
+    def _informix_pstmts(self, procid, data_rows):
+        """Two prepareStatement() calls in order: resolve procid, then read chunks."""
+        id_pstmt = MagicMock()
+        id_pstmt.executeQuery.return_value = self._id_rs(procid)
+        data_pstmt = MagicMock()
+        data_pstmt.executeQuery.return_value = self._rs_for_rows(["data"], data_rows)
+        return [id_pstmt, data_pstmt]
+
     def _pool_conn(self, db_type):
         pool = _build_pool(pool_size=1)
         conn = pool.acquire()
@@ -417,10 +468,9 @@ class TestGetProcedureSource:
 
         reset_cache()
         conn = self._pool_conn("informix-sqli")
-        rs = self._rs_for_rows(["data"], [("CREATE PROCEDURE p()\n",), ("  RETURN 1;\nEND PROCEDURE",)])
-        pstmt = MagicMock()
-        pstmt.executeQuery.return_value = rs
-        conn._jc.prepareStatement.return_value = pstmt
+        conn._jc.prepareStatement.side_effect = self._informix_pstmts(
+            101, [("CREATE PROCEDURE p()\n",), ("  RETURN 1;\nEND PROCEDURE",)]
+        )
 
         source = conn.get_procedure_source("p")
 
@@ -431,12 +481,13 @@ class TestGetProcedureSource:
 
         reset_cache()
         conn = self._pool_conn("informix-sqli")
-        rs = self._rs_for_rows(["data"], [])
-        pstmt = MagicMock()
-        pstmt.executeQuery.return_value = rs
-        conn._jc.prepareStatement.return_value = pstmt
+        id_pstmt = MagicMock()
+        id_pstmt.executeQuery.return_value = self._id_rs(None)
+        conn._jc.prepareStatement.return_value = id_pstmt
 
         assert conn.get_procedure_source("does_not_exist") is None
+        # procid never resolved - the sysprocbody query must not even run.
+        conn._jc.prepareStatement.assert_called_once()
 
     def test_mysql_extracts_create_procedure_column(self):
         from wbjdbc.cache import reset_cache
@@ -497,16 +548,244 @@ class TestGetProcedureSource:
 
         reset_cache()
         conn = self._pool_conn("informix-sqli")
-        rs = self._rs_for_rows(["data"], [("CREATE PROCEDURE p() RETURN 1; END PROCEDURE",)])
-        pstmt = MagicMock()
-        pstmt.executeQuery.return_value = rs
-        conn._jc.prepareStatement.return_value = pstmt
+        conn._jc.prepareStatement.side_effect = self._informix_pstmts(
+            101, [("CREATE PROCEDURE p() RETURN 1; END PROCEDURE",)]
+        )
 
         first = conn.get_procedure_source("p")
         second = conn.get_procedure_source("p")
 
         assert first == second
-        assert conn._jc.prepareStatement.call_count == 1
+        assert conn._jc.prepareStatement.call_count == 2  # id + data, once - not four
+
+    def test_informix_pins_a_single_procid_never_blends_two_procedures(self):
+        # Two different procedures can share a name in Informix (different owners).
+        # get_procedure_source must never interleave their sysprocbody chunks into
+        # one garbled body - procid is resolved to one specific value before any
+        # sysprocbody row is read, so this fixture returning rows for only ONE
+        # procid, regardless of how many sysprocedures rows match procname, proves
+        # the query scopes correctly rather than relying on mocking away the
+        # ambiguity.
+        from wbjdbc.cache import reset_cache
+
+        reset_cache()
+        conn = self._pool_conn("informix-sqli")
+        id_pstmt, data_pstmt = self._informix_pstmts(
+            101, [("CREATE PROCEDURE p() RETURN 1; END PROCEDURE",)]
+        )
+        conn._jc.prepareStatement.side_effect = [id_pstmt, data_pstmt]
+
+        source = conn.get_procedure_source("p")
+
+        assert source == "CREATE PROCEDURE p() RETURN 1; END PROCEDURE"
+        id_sql = conn._jc.prepareStatement.call_args_list[0][0][0]
+        data_sql = conn._jc.prepareStatement.call_args_list[1][0][0]
+        assert "SELECT FIRST 1 procid" in id_sql and "AND owner = ?" not in id_sql
+        assert "WHERE procid = ?" in data_sql
+        data_pstmt.setInt.assert_called_once_with(1, 101)
+
+    def test_informix_owner_disambiguates_and_is_bound(self):
+        from wbjdbc.cache import reset_cache
+
+        reset_cache()
+        conn = self._pool_conn("informix-sqli")
+        id_pstmt, data_pstmt = self._informix_pstmts(
+            202, [("CREATE PROCEDURE p() RETURN 2; END PROCEDURE",)]
+        )
+        conn._jc.prepareStatement.side_effect = [id_pstmt, data_pstmt]
+
+        source = conn.get_procedure_source("p", owner="alice")
+
+        assert source == "CREATE PROCEDURE p() RETURN 2; END PROCEDURE"
+        id_sql = conn._jc.prepareStatement.call_args_list[0][0][0]
+        assert "AND owner = ?" in id_sql
+        id_pstmt.setString.assert_any_call(2, "alice")
+
+    def test_informix_owner_and_no_owner_cache_separately(self):
+        # Same proc_name, different owner= arg - must not collide in the schema
+        # cache and return the wrong procedure's source for the other.
+        from wbjdbc.cache import reset_cache
+
+        reset_cache()
+        conn = self._pool_conn("informix-sqli")
+
+        conn._jc.prepareStatement.side_effect = self._informix_pstmts(
+            101, [("CREATE PROCEDURE p() RETURN 1; END PROCEDURE",)]
+        )
+        unqualified = conn.get_procedure_source("p")
+
+        conn._jc.prepareStatement.side_effect = self._informix_pstmts(
+            202, [("CREATE PROCEDURE p() RETURN 2; END PROCEDURE",)]
+        )
+        owned = conn.get_procedure_source("p", owner="alice")
+
+        assert unqualified != owned
+        assert conn._jc.prepareStatement.call_count == 4  # 2 id+data round trips
+
+    def test_invalid_owner_raises_value_error(self):
+        conn = self._pool_conn("informix-sqli")
+        with pytest.raises(ValueError):
+            conn.get_procedure_source("p", owner="alice; DROP TABLE x; --")
+
+    def test_informix_numargs_disambiguates_and_is_bound(self):
+        # Same name, same owner, different arity - real overloading (not just an
+        # owner clash). Without numargs, the lowest procid wins; with it, the
+        # matching overload is pinned down explicitly.
+        from wbjdbc.cache import reset_cache
+
+        reset_cache()
+        conn = self._pool_conn("informix-sqli")
+        id_pstmt, data_pstmt = self._informix_pstmts(
+            579, [("CREATE PROCEDURE p(a INT, b INT) RETURN a+b; END PROCEDURE",)]
+        )
+        conn._jc.prepareStatement.side_effect = [id_pstmt, data_pstmt]
+
+        source = conn.get_procedure_source("p", numargs=2)
+
+        assert source == "CREATE PROCEDURE p(a INT, b INT) RETURN a+b; END PROCEDURE"
+        id_sql = conn._jc.prepareStatement.call_args_list[0][0][0]
+        assert "AND numargs = ?" in id_sql and "AND owner = ?" not in id_sql
+        id_pstmt.setInt.assert_called_once_with(2, 2)
+
+    def test_informix_owner_and_numargs_combined_bind_positions(self):
+        from wbjdbc.cache import reset_cache
+
+        reset_cache()
+        conn = self._pool_conn("informix-sqli")
+        id_pstmt, data_pstmt = self._informix_pstmts(
+            579, [("CREATE PROCEDURE p(a INT, b INT) RETURN a+b; END PROCEDURE",)]
+        )
+        conn._jc.prepareStatement.side_effect = [id_pstmt, data_pstmt]
+
+        conn.get_procedure_source("p", owner="alice", numargs=2)
+
+        id_sql = conn._jc.prepareStatement.call_args_list[0][0][0]
+        assert "AND owner = ?" in id_sql and "AND numargs = ?" in id_sql
+        id_pstmt.setString.assert_any_call(2, "alice")
+        id_pstmt.setInt.assert_called_once_with(3, 2)
+
+    def test_numargs_disambiguates_cache_too(self):
+        # Two overloads of "p", same owner - must not collide in the schema cache.
+        from wbjdbc.cache import reset_cache
+
+        reset_cache()
+        conn = self._pool_conn("informix-sqli")
+
+        conn._jc.prepareStatement.side_effect = self._informix_pstmts(
+            578, [("CREATE PROCEDURE p(a INT) RETURN a; END PROCEDURE",)]
+        )
+        one_arg = conn.get_procedure_source("p", numargs=1)
+
+        conn._jc.prepareStatement.side_effect = self._informix_pstmts(
+            579, [("CREATE PROCEDURE p(a INT, b INT) RETURN a+b; END PROCEDURE",)]
+        )
+        two_args = conn.get_procedure_source("p", numargs=2)
+
+        assert one_arg != two_args
+        assert conn._jc.prepareStatement.call_count == 4
+
+    def test_invalid_numargs_raises_value_error(self):
+        conn = self._pool_conn("informix-sqli")
+        with pytest.raises(ValueError):
+            conn.get_procedure_source("p", numargs=-1)
+        with pytest.raises(ValueError):
+            conn.get_procedure_source("p", numargs="2")
+
+
+class TestListProcedures:
+    def _rs_for_rows(self, cols, rows):
+        rs = MagicMock()
+        meta = MagicMock()
+        meta.getColumnCount.return_value = len(cols)
+        meta.getColumnLabel.side_effect = lambda i: cols[i - 1]
+        meta.getColumnType.return_value = 12
+        rs.getMetaData.return_value = meta
+        row_iter = iter(rows)
+        current = [None]
+
+        def _next():
+            try:
+                current[0] = next(row_iter)
+                return True
+            except StopIteration:
+                return False
+
+        rs.next.side_effect = _next
+        rs.getObject.side_effect = lambda i: current[0][i - 1]
+        return rs
+
+    def _pool_conn(self, db_type):
+        pool = _build_pool(pool_size=1)
+        conn = pool.acquire()
+        conn._db_type = db_type
+        conn._database = "testdb"
+        return conn
+
+    def test_informix_returns_raw_rows_no_filtering(self):
+        # No system-owner/overload filtering here by design - that's left to the
+        # caller (see OPTIMIZATION_GUIDE.md). Two rows sharing a name (an overload)
+        # and a row owned by "informix" must both come through untouched.
+        conn = self._pool_conn("informix-sqli")
+        rs = self._rs_for_rows(
+            ["procname", "owner", "numargs", "isproc"],
+            [
+                ("p", "alice", 1, "f"),
+                ("p", "alice", 2, "f"),
+                ("install_jar", "sqlj", 1, "t"),
+            ],
+        )
+        pstmt = MagicMock()
+        pstmt.executeQuery.return_value = rs
+        conn._jc.prepareStatement.return_value = pstmt
+
+        procs = conn.list_procedures()
+
+        assert procs == [
+            {"name": "p", "owner": "alice", "numargs": 1, "is_function": True},
+            {"name": "p", "owner": "alice", "numargs": 2, "is_function": True},
+            {"name": "install_jar", "owner": "sqlj", "numargs": 1, "is_function": False},
+        ]
+
+    def test_mysql_maps_routine_type_to_is_function(self):
+        conn = self._pool_conn("mysql")
+        rs = self._rs_for_rows(
+            ["ROUTINE_NAME", "ROUTINE_SCHEMA", "ROUTINE_TYPE"],
+            [("pr_x", "testdb", "PROCEDURE"), ("fn_x", "testdb", "FUNCTION")],
+        )
+        pstmt = MagicMock()
+        pstmt.executeQuery.return_value = rs
+        conn._jc.prepareStatement.return_value = pstmt
+
+        procs = conn.list_procedures()
+
+        assert procs == [
+            {"name": "pr_x", "owner": "testdb", "numargs": None, "is_function": False},
+            {"name": "fn_x", "owner": "testdb", "numargs": None, "is_function": True},
+        ]
+
+    def test_postgresql_maps_prokind_to_is_function(self):
+        conn = self._pool_conn("postgresql")
+        rs = self._rs_for_rows(
+            ["proname", "nspname", "pronargs", "prokind"],
+            [("fn_x", "public", 2, "f"), ("pr_x", "public", 0, "p")],
+        )
+        pstmt = MagicMock()
+        pstmt.executeQuery.return_value = rs
+        conn._jc.prepareStatement.return_value = pstmt
+
+        procs = conn.list_procedures()
+
+        assert procs == [
+            {"name": "fn_x", "owner": "public", "numargs": 2, "is_function": True},
+            {"name": "pr_x", "owner": "public", "numargs": 0, "is_function": False},
+        ]
+
+    def test_unsupported_db_type_raises_not_supported_error(self):
+        from wbjdbc.exceptions import NotSupportedError
+
+        conn = self._pool_conn("oracle")
+        with pytest.raises(NotSupportedError):
+            conn.list_procedures()
 
 
 class TestGetTableColumns:

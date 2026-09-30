@@ -18,6 +18,7 @@
   - [Real Async Support](#real-async-support)
   - [Stored Procedures](#stored-procedures)
   - [Stored Procedure Source (DDL)](#stored-procedure-source-ddl)
+  - [Listing Every Procedure (Bulk Catalog Population)](#listing-every-procedure-bulk-catalog-population)
   - [LOB (BLOB/CLOB) Handling](#lob-blobclob-handling)
   - [Savepoints](#savepoints)
   - [Metrics & Logging](#metrics--logging)
@@ -689,15 +690,65 @@ Works across all three dialects, each backed by a different source:
 - **informix-sqli**: `sysprocbody`/`sysprocedures` - the source is stored pre-chopped
   into fixed-width rows, read directly off the JDBC `ResultSet` (bypassing the normal
   type-conversion path, which would otherwise strip whitespace at row boundaries) and
-  reassembled in order.
+  reassembled in order. `procname` isn't unique on its own, two separate ways: the
+  same name can exist under different owners, and the same owner can have several
+  overloads of the same name differing only in parameter count (real overloading).
+  `conn.get_procedure_source(proc_name, owner=None, numargs=None)` takes both as
+  optional disambiguators (`numargs` matches `sysprocedures.numargs`); left
+  unspecified, either one falls back to the lowest `procid` match, picked
+  deterministically (same "pick one, documented" contract as postgresql below).
+  Either way, `procid` is resolved to a single value *before* any `sysprocbody` row
+  is read, so routines sharing a name can never have their chunks interleaved into
+  one corrupted body.
 - **mysql**: `SHOW CREATE PROCEDURE proc_name`.
 - **postgresql**: `pg_get_functiondef(oid)` via `pg_proc` (covers both functions and
   procedures since PG11). If multiple overloads share the name, only one (arbitrary)
   definition is returned - `pg_proc` doesn't key by name alone.
 
-`proc_name` is validated as a plain identifier before use (raises `ValueError`
-otherwise), the result is cached in the same schema cache `get_table_columns()` uses,
+`proc_name`/`owner` are validated as plain identifiers and `numargs` as a
+non-negative int before use (raises `ValueError` otherwise); the result is cached in
+the same schema cache `get_table_columns()` uses, keyed on the combination of
+`proc_name`/`owner`/`numargs` actually passed so different overloads never collide;
 and an unsupported `db_type` raises `NotSupportedError` rather than returning `None`.
+
+### Listing Every Procedure (Bulk Catalog Population)
+
+`conn.list_procedures()` lists every stored procedure/function the connection can
+see - `informix-sqli` (`sysprocedures`), `mysql` (`information_schema.ROUTINES`,
+scoped to the connected database), `postgresql` (`pg_proc`, excluding the
+`pg_catalog`/`information_schema` namespaces). Each entry is a dict:
+
+```python
+for p in conn.list_procedures():
+    print(p)  # {"name": "...", "owner": "...", "numargs": 2, "is_function": True}
+    source = conn.get_procedure_source(p["name"], owner=p["owner"], numargs=p["numargs"])
+```
+
+It deliberately does **not** try to filter out the database engine's own built-in
+routines - on Informix specifically there's no clean flag that does this reliably
+(`isproc` distinguishes "returns a value" from "doesn't", not "built-in" from
+"user-written" - most real business procedures use `RETURNING` and would be wrongly
+excluded by a naive `isproc = 't'` filter; `internal` and "has a `sysprocbody`
+entry" don't discriminate either, since hundreds of the engine's own built-ins have
+both). Filtering out what you don't want is left to the caller - typically an
+owner/schema exclude-list (`informix`, `sqlj`, `sysibm`, `sysproc` on Informix;
+`pg_catalog`/`information_schema` are already excluded on postgresql above) - since
+it depends on your environment's own naming conventions.
+
+`owner` is `None` for routines with no meaningful owner in that dialect; `numargs`
+is `None` on mysql, which doesn't support overloading. Each overload (same name,
+different `numargs`) is returned as its own entry with its own `owner`/`numargs` -
+not deduplicated - so pass those straight into `get_procedure_source()` to fetch a
+specific one unambiguously (on informix-sqli; postgresql's `get_procedure_source()`
+still picks one arbitrarily among overloads regardless of `numargs`, since it isn't
+accepted there today).
+
+**Custom driver jar**: `connect_optimized(..., driver_jar="/path/to/driver.jar")` uses
+that jar instead of the one bundled with wbjdbc - e.g. to pull the driver from your own
+internal artifact repository instead of the copy in `wbjdbc/resources/maven/`. Raises
+`ValueError` immediately if the path doesn't exist, before touching the JVM. Only
+replaces the main driver jar - Informix's BSON companion jar (needed for JSON/BSON
+columns) still comes from the bundled copy regardless.
 
 ---
 
