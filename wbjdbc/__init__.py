@@ -47,7 +47,7 @@ DEFAULT_DRIVERS = {
 }
 
 # Version
-__version__ = "2.3.1"
+__version__ = "2.4.0"
 version = __version__
 
 _STMT_CACHE_SIZE = 20
@@ -524,17 +524,17 @@ class _PooledConn:
         Return a CREATE TABLE statement that reproduces table_name - columns (with
         type, nullability, default), PRIMARY KEY, FOREIGN KEY, UNIQUE, CHECK
         constraints and standalone indexes - or None if the table doesn't exist.
-        Works for informix-sqli and mysql. Cached via the schema cache, same as
-        get_table_columns().
+        Works for informix-sqli, mysql and postgresql. Cached via the schema cache,
+        same as get_table_columns().
 
-        `owner` disambiguates a table name that exists under more than one owner;
-        left as None, the lowest-numbered match wins deterministically
-        (informix-sqli only - mysql table names are already unique per database,
-        so `owner` has no effect there).
+        `owner` disambiguates a table name that exists under more than one
+        owner/schema; left as None, the lowest-numbered match wins deterministically
+        (informix-sqli: table owner; postgresql: schema - mysql table names are
+        already unique per database, so `owner` has no effect there).
 
-        Round-trip tested against a real Informix instance: dropping the original
-        table and re-running the generated DDL recreates it with working
-        constraints (including a real CHECK rejecting a bad INSERT).
+        Round-trip tested against real Informix and PostgreSQL instances: dropping
+        the original table and re-running the generated DDL recreates it with
+        working constraints (including a real CHECK rejecting a bad INSERT).
         """
         if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", table_name):
             raise ValueError(f"Invalid table name: {table_name!r}")
@@ -548,15 +548,17 @@ class _PooledConn:
         if cached is not None:
             return cached
 
-        if self._db_type not in ("informix-sqli", "mysql"):
+        if self._db_type not in ("informix-sqli", "mysql", "postgresql"):
             raise NotSupportedError(
                 f"get_table_ddl() is not implemented for db_type={self._db_type!r}"
             )
 
         if self._db_type == "informix-sqli":
             ddl = self._informix_table_ddl(table_name, owner)
-        else:
+        elif self._db_type == "mysql":
             ddl = self._mysql_table_ddl(table_name)
+        else:
+            ddl = self._postgresql_table_ddl(table_name, owner)
 
         if ddl is not None:
             schema_cache.set_table_ddl(database, cache_name, ddl)
@@ -570,6 +572,97 @@ class _PooledConn:
             return None
         row = cur.fetchone()
         return row[1] if row else None
+
+    def _postgresql_table_ddl(self, table_name, owner):
+        cur = self.cursor()
+        qualified = f'"{owner}"."{table_name}"' if owner else f'"{table_name}"'
+        try:
+            cur.execute(
+                "SELECT c.oid, n.nspname, c.relname FROM pg_class c "
+                "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                "WHERE c.oid = to_regclass(?)",
+                (qualified,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            oid, schema, bare_name = row
+
+            full_name = f"{schema}.{bare_name}"
+            cur.execute(
+                "SELECT a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull, "
+                "pg_get_expr(ad.adbin, ad.adrelid), pg_get_serial_sequence(?, a.attname) "
+                "FROM pg_attribute a "
+                "LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum "
+                "WHERE a.attrelid = ? AND a.attnum > 0 AND NOT a.attisdropped "
+                "ORDER BY a.attnum",
+                (full_name, oid),
+            )
+            col_lines = []
+            owned_sequences = []  # (seq_qualified_name, column_name) for ALTER ... OWNED BY
+            for name, col_type, notnull, default, serial_seq in cur.fetchall():
+                line = f'    "{name}" {col_type}'
+                if notnull:
+                    line += " NOT NULL"
+                if default:
+                    line += f" DEFAULT {default}"
+                col_lines.append(line)
+                if serial_seq:
+                    owned_sequences.append((serial_seq, name))
+
+            # DEFAULT nextval('seq') only works if that sequence actually exists -
+            # generate the CREATE SEQUENCE (and restore its OWNED BY link) instead of
+            # just assuming one with that exact name is already there to reference.
+            create_sequence_lines = []
+            alter_owned_lines = []
+            for seq_name, col_name in owned_sequences:
+                seq_schema, _, seq_bare = seq_name.rpartition(".")
+                cur.execute(
+                    "SELECT start_value, increment_by, min_value, max_value, cache_size "
+                    "FROM pg_sequences WHERE schemaname = ? AND sequencename = ?",
+                    (seq_schema or schema, seq_bare),
+                )
+                seq_row = cur.fetchone()
+                if not seq_row:
+                    continue
+                start, incr, minv, maxv, cache = seq_row
+                create_sequence_lines.append(
+                    f'CREATE SEQUENCE "{seq_schema or schema}"."{seq_bare}" '
+                    f"START {start} INCREMENT BY {incr} MINVALUE {minv} MAXVALUE {maxv} "
+                    f"CACHE {cache};"
+                )
+                alter_owned_lines.append(
+                    f'ALTER SEQUENCE "{seq_schema or schema}"."{seq_bare}" OWNED BY '
+                    f'"{schema}"."{bare_name}"."{col_name}";'
+                )
+
+            cur.execute(
+                "SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conrelid = ? ORDER BY contype",
+                (oid,),
+            )
+            constraint_lines = [
+                f'    CONSTRAINT "{name}" {condef}' for name, condef in cur.fetchall()
+            ]
+
+            cur.execute(
+                "SELECT pg_get_indexdef(i.indexrelid) FROM pg_index i "
+                "WHERE i.indrelid = ? AND i.indexrelid NOT IN "
+                "(SELECT conindid FROM pg_constraint WHERE conrelid = ? AND conindid != 0)",
+                (oid, oid),
+            )
+            extra_indexes = [r[0] + ";" for r in cur.fetchall()]
+        except DatabaseError:
+            return None
+
+        ddl = ""
+        if create_sequence_lines:
+            ddl += "\n".join(create_sequence_lines) + "\n"
+        ddl += f'CREATE TABLE "{schema}"."{bare_name}" (\n' + ",\n".join(col_lines + constraint_lines) + "\n);"
+        trailing = alter_owned_lines + extra_indexes
+        if trailing:
+            ddl += "\n" + "\n".join(trailing)
+        return ddl
 
     def _informix_table_ddl(self, table_name, owner):
         cur = self.cursor()

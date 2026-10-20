@@ -2,6 +2,34 @@
 
 All notable changes to wbjdbc are documented here.
 
+## [2.4.0] - 2026-10-20
+
+### Added
+
+- **`get_table_ddl(table_name, owner=None)`** - returns a `CREATE TABLE` statement
+  that reproduces a table: columns (type, nullability, default), `PRIMARY KEY`,
+  `FOREIGN KEY`, `UNIQUE`, `CHECK` constraints and standalone indexes. Works for
+  `informix-sqli`, `mysql` and `postgresql`; `owner` disambiguates a table name
+  that exists under more than one owner/schema (same contract as
+  `get_procedure_source()`'s `owner`). Round-trip tested against real Informix and
+  PostgreSQL instances - dropping the original table and re-running the generated
+  DDL recreates it with working constraints, including a real `CHECK` rejecting a
+  bad `INSERT` afterward.
+  - `mysql`: `SHOW CREATE TABLE`.
+  - `postgresql`: reconstructed from `pg_attribute`/`pg_constraint`/`pg_index`
+    (`format_type()`, `pg_get_constraintdef()`, `pg_get_indexdef()`). Serial/identity
+    columns also get their backing `CREATE SEQUENCE` (and `ALTER SEQUENCE ... OWNED
+    BY`) generated alongside the table, rather than assuming a sequence with that
+    exact name already exists to reference.
+  - `informix-sqli`: reconstructed from `syscolumns`/`sysconstraints`/`sysindexes`/
+    `sysreferences`/`sysdefaults`/`syschecks`. Column types are decoded from
+    `coltype`/`collength` (including the `DATETIME`/`INTERVAL` qualifier packing,
+    reverse-engineered against a real instance since it isn't reliably documented -
+    see `OPTIMIZATION_GUIDE.md`). Column defaults handle `TODAY`/`CURRENT`/literal
+    values. Constraint clauses use Informix's own `<definition> CONSTRAINT name`
+    order (not the ANSI `CONSTRAINT name <definition>` order MySQL/PostgreSQL use -
+    the ANSI order is a bare syntax error here).
+
 ## [2.3.1] - 2026-09-29
 
 ### Fixed

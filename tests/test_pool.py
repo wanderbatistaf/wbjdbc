@@ -960,6 +960,51 @@ class TestGetTableDdl:
 
         assert conn.get_table_ddl("does_not_exist") is None
 
+    def test_postgresql_builds_ddl_with_sequence_and_pk(self):
+        # Covers the two trickiest bits: a SERIAL/identity column needing its own
+        # CREATE SEQUENCE + ALTER SEQUENCE OWNED BY generated alongside the table
+        # (DEFAULT nextval('seq') is useless if that sequence doesn't exist), and a
+        # PRIMARY KEY coming back pre-formatted from pg_get_constraintdef().
+        from wbjdbc.cache import reset_cache
+
+        reset_cache()
+        conn = self._pool_conn("postgresql")
+        pstmts = self._pstmt_sequence(
+            [(100, "public", "t")],  # oid, schema, bare_name
+            [  # columns: id serial (owns a sequence), name text (nullable, no default)
+                ("id", "integer", True, "nextval('t_id_seq'::regclass)", "public.t_id_seq"),
+                ("name", "text", False, None, None),
+            ],
+            [(1, 1, 1, 2147483647, 1)],  # pg_sequences row for t_id_seq
+            [("t_pkey", "PRIMARY KEY (id)")],  # pg_constraint
+            [],  # no standalone indexes
+        )
+        conn._jc.prepareStatement.side_effect = pstmts
+
+        ddl = conn.get_table_ddl("t")
+
+        assert ddl == (
+            'CREATE SEQUENCE "public"."t_id_seq" START 1 INCREMENT BY 1 MINVALUE 1 '
+            "MAXVALUE 2147483647 CACHE 1;\n"
+            'CREATE TABLE "public"."t" (\n'
+            '    "id" integer NOT NULL DEFAULT nextval(\'t_id_seq\'::regclass),\n'
+            '    "name" text,\n'
+            '    CONSTRAINT "t_pkey" PRIMARY KEY (id)\n'
+            ");\n"
+            'ALTER SEQUENCE "public"."t_id_seq" OWNED BY "public"."t"."id";'
+        )
+
+    def test_postgresql_not_found_returns_none(self):
+        from wbjdbc.cache import reset_cache
+
+        reset_cache()
+        conn = self._pool_conn("postgresql")
+        pstmt = MagicMock()
+        pstmt.executeQuery.return_value = self._rs_for_rows([])
+        conn._jc.prepareStatement.return_value = pstmt
+
+        assert conn.get_table_ddl("does_not_exist") is None
+
     def test_informix_simple_table_pk_only(self):
         # The simplest path: no FK/CHECK/extra index, so exactly 5 queries run in
         # order - resolve tabid, columns, defaults, index parts, constraints.

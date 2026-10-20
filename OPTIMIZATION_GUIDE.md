@@ -752,21 +752,30 @@ accepted there today).
 reproduces the table - columns (type, nullability, default), `PRIMARY KEY`,
 `FOREIGN KEY`, `UNIQUE`, `CHECK` constraints and standalone indexes - or `None` if
 it doesn't exist. `owner` disambiguates a table name that exists under more than one
-owner, same contract as `get_procedure_source()`'s `owner` (informix-sqli only -
-`owner` has no effect on mysql, where table names are already unique per database).
-postgresql isn't supported yet.
+owner/schema, same contract as `get_procedure_source()`'s `owner` (informix-sqli:
+table owner; postgresql: schema; `owner` has no effect on mysql, where table names
+are already unique per database).
 
 ```python
 ddl = conn.get_table_ddl("customers")
 print(ddl)  # the full CREATE TABLE text
 ```
 
-Round-trip tested against a real Informix instance: dropping the original table and
-re-running the generated DDL recreates it with working constraints - including a
-real `CHECK` rejecting a bad `INSERT` afterward, not just a `CREATE TABLE` that
-parses.
+Round-trip tested against real Informix and PostgreSQL instances: dropping the
+original table and re-running the generated DDL recreates it with working
+constraints - including a real `CHECK` rejecting a bad `INSERT` afterward, not just
+a `CREATE TABLE` that parses.
 
 - **mysql**: `SHOW CREATE TABLE` - the engine already does the reconstruction.
+- **postgresql**: built from `pg_attribute` (`format_type()` for the exact type
+  text, e.g. `character varying(50)`), `pg_constraint` (`pg_get_constraintdef()`
+  gives the full clause text for `PRIMARY KEY`/`FOREIGN KEY`/`UNIQUE`/`CHECK` in one
+  call each) and `pg_index` (`pg_get_indexdef()` for standalone indexes, excluding
+  ones already backing a constraint via `conindid`). A `SERIAL`/identity column's
+  `DEFAULT nextval('seq')` only works if that sequence exists -
+  `pg_get_serial_sequence()` finds it per column, and its `CREATE SEQUENCE`/`ALTER
+  SEQUENCE ... OWNED BY` are generated alongside the table rather than assuming a
+  same-named sequence is already there to reference.
 - **informix-sqli**: built from `syscolumns`, `sysconstraints`, `sysindexes`,
   `sysreferences`, `sysdefaults` and `syschecks` - none of which expose a ready-made
   DDL string the way `sysprocbody` does for procedures, so this is a genuine
