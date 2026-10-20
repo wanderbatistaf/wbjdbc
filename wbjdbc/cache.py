@@ -196,6 +196,10 @@ class SchemaCache:
         """Create cache key for procedure source."""
         return f"procedure:{database}:{proc_name}"
 
+    def _make_table_ddl_key(self, database: str, table: str) -> str:
+        """Create cache key for table DDL."""
+        return f"table_ddl:{database}:{table}"
+
     def get_procedure_source(self, database: str, proc_name: str) -> Optional[str]:
         """
         Get cached stored procedure/function source text.
@@ -227,6 +231,38 @@ class SchemaCache:
 
         key = self._make_procedure_key(database, proc_name)
         self.cache.set(key, source)
+
+    def get_table_ddl(self, database: str, table: str) -> Optional[str]:
+        """
+        Get cached table DDL text.
+
+        Args:
+            database: Database name
+            table: Table name (as passed to get_table_ddl(), may include an owner suffix)
+
+        Returns:
+            Table DDL text or None
+        """
+        if not self.enabled:
+            return None
+
+        key = self._make_table_ddl_key(database, table)
+        return self.cache.get(key)
+
+    def set_table_ddl(self, database: str, table: str, ddl: str):
+        """
+        Cache table DDL text.
+
+        Args:
+            database: Database name
+            table: Table name (as passed to get_table_ddl(), may include an owner suffix)
+            ddl: Table DDL text
+        """
+        if not self.enabled:
+            return
+
+        key = self._make_table_ddl_key(database, table)
+        self.cache.set(key, ddl)
 
     def get_table_metadata(self, database: str, table: str) -> Optional[Dict[str, Any]]:
         """
@@ -319,6 +355,7 @@ class SchemaCache:
 
         self.cache.invalidate(self._make_table_key(database, table))
         self.cache.invalidate(self._make_columns_key(database, table))
+        self.cache.invalidate(self._make_table_ddl_key(database, table))
         self.logger.info(f"Invalidated cache for {database}.{table}")
 
     def invalidate_database(self, database: str):

@@ -19,6 +19,7 @@
   - [Stored Procedures](#stored-procedures)
   - [Stored Procedure Source (DDL)](#stored-procedure-source-ddl)
   - [Listing Every Procedure (Bulk Catalog Population)](#listing-every-procedure-bulk-catalog-population)
+  - [Table DDL](#table-ddl)
   - [LOB (BLOB/CLOB) Handling](#lob-blobclob-handling)
   - [Savepoints](#savepoints)
   - [Metrics & Logging](#metrics--logging)
@@ -742,6 +743,65 @@ not deduplicated - so pass those straight into `get_procedure_source()` to fetch
 specific one unambiguously (on informix-sqli; postgresql's `get_procedure_source()`
 still picks one arbitrarily among overloads regardless of `numargs`, since it isn't
 accepted there today).
+
+---
+
+### Table DDL
+
+`conn.get_table_ddl(table_name, owner=None)` returns a `CREATE TABLE` statement that
+reproduces the table - columns (type, nullability, default), `PRIMARY KEY`,
+`FOREIGN KEY`, `UNIQUE`, `CHECK` constraints and standalone indexes - or `None` if
+it doesn't exist. `owner` disambiguates a table name that exists under more than one
+owner, same contract as `get_procedure_source()`'s `owner` (informix-sqli only -
+`owner` has no effect on mysql, where table names are already unique per database).
+postgresql isn't supported yet.
+
+```python
+ddl = conn.get_table_ddl("customers")
+print(ddl)  # the full CREATE TABLE text
+```
+
+Round-trip tested against a real Informix instance: dropping the original table and
+re-running the generated DDL recreates it with working constraints - including a
+real `CHECK` rejecting a bad `INSERT` afterward, not just a `CREATE TABLE` that
+parses.
+
+- **mysql**: `SHOW CREATE TABLE` - the engine already does the reconstruction.
+- **informix-sqli**: built from `syscolumns`, `sysconstraints`, `sysindexes`,
+  `sysreferences`, `sysdefaults` and `syschecks` - none of which expose a ready-made
+  DDL string the way `sysprocbody` does for procedures, so this is a genuine
+  reconstruction, type by type:
+  - `coltype`/`collength` decode to a SQL type name; the `DATETIME`/`INTERVAL`
+    qualifier (`YEAR TO SECOND` etc.) is packed into `collength` as two nibbles
+    (`largest*16 + smallest`, time units `YEAR=0, MONTH=2, DAY=4, HOUR=6, MINUTE=8,
+    SECOND=10, FRACTION(n)=10+n`) plus the byte length (`length*256 + qualifier`) -
+    reverse-engineered against a real instance across 8 qualifier combinations,
+    since this isn't reliably documented.
+  - Column defaults (`sysdefaults`) come back as `TODAY`/`CURRENT`/`NULL` type codes
+    needing no parsing, or type `'L'` (literal) encoded as `"<header><single
+    space><value>"` for numeric literals (header may be empty) - confirmed
+    empirically, not from docs. String literals instead carry a trailing `\x00`
+    terminator that `str.strip()` won't touch, since `\x00` isn't Unicode
+    whitespace. `DEFAULT CURRENT` on a `DATETIME` column needs the column's own
+    qualifier repeated (`DEFAULT CURRENT YEAR TO SECOND`) - a bare `DEFAULT CURRENT`
+    is rejected with "Invalid default value for column/variable".
+  - System-generated index names (`sysindexes.idxname`) come back with a leading
+    space (`" 126_37"`, confirmed via `idxname[1,1]`) that's already gone by the time
+    `sysconstraints.idxname` reaches Python (ordinary string conversion strips it) -
+    matching them with a SQL `WHERE idxname = ?` bound to the stripped value
+    silently matches zero rows instead of erroring, so the match happens in Python
+    against both sides stripped the same way, not in SQL.
+  - A table-level constraint clause is named with Informix's own trailing order -
+    `PRIMARY KEY (col) CONSTRAINT name` - not the ANSI `CONSTRAINT name PRIMARY KEY
+    (col)` order MySQL/PostgreSQL use; the ANSI order is a bare syntax error here.
+  - `CHECK` constraint text (`syschecks`, `type = 'T'`) can be split across multiple
+    rows the same way `sysprocbody` is - same chunk-reassembly fix as
+    `get_procedure_source()` (raw JDBC read, no per-chunk `_j2p` stripping) applies
+    here too.
+  - Collection/row/opaque column types (`SET`, `MULTISET`, `LIST`, `ROW`,
+    user-defined opaque types) aren't implemented - `get_table_ddl()` raises
+    `NotSupportedError` naming the unhandled type rather than silently emitting
+    wrong DDL for them.
 
 **Custom driver jar**: `connect_optimized(..., driver_jar="/path/to/driver.jar")` uses
 that jar instead of the one bundled with wbjdbc - e.g. to pull the driver from your own

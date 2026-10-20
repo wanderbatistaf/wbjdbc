@@ -154,6 +154,10 @@ class OptimizedJDBCConnection:
         """Get column information for a table (with caching)."""
         return self._core.get_table_columns(table)
 
+    def get_table_ddl(self, table_name: str, owner: Optional[str] = None) -> Optional[str]:
+        """Get the CREATE TABLE statement for a table (with caching)."""
+        return self._core.get_table_ddl(table_name, owner=owner)
+
     def get_procedure_source(
         self, proc_name: str, owner: Optional[str] = None, numargs: Optional[int] = None
     ) -> Optional[str]:

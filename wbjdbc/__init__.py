@@ -76,6 +76,78 @@ def _is_sensitive_sql(sql):
     return any(w in sql_lower for w in _SENSITIVE)
 
 
+# Informix encodes DATETIME/INTERVAL qualifiers (YEAR TO SECOND etc.) as two packed
+# nibbles in syscolumns.collength - reverse-engineered empirically against a real
+# instance (docs describe the shape but not reliably enough to trust blind), see
+# OPTIMIZATION_GUIDE.md for the worked examples this was derived from.
+_INFORMIX_TIME_UNITS = {0: "YEAR", 2: "MONTH", 4: "DAY", 6: "HOUR", 8: "MINUTE", 10: "SECOND"}
+
+# Base types whose literal column defaults need to be quoted when regenerated as DDL.
+_INFORMIX_QUOTED_BASE_TYPES = {0, 7, 10, 13, 15, 16, 40, 41}
+
+
+def _informix_dt_qualifier(collength):
+    """Decode a DATETIME/INTERVAL qualifier (e.g. "YEAR TO SECOND") from collength."""
+    qualifier = collength % 256
+    largest, smallest = qualifier // 16, qualifier % 16
+    smallest_sql = f"FRACTION({smallest - 10})" if smallest >= 11 else _INFORMIX_TIME_UNITS.get(smallest, "SECOND")
+    largest_sql = _INFORMIX_TIME_UNITS.get(largest, "YEAR")
+    return largest_sql, smallest_sql
+
+
+def _informix_type_sql(coltype, collength):
+    """Render an Informix syscolumns.coltype/collength pair as a SQL type name."""
+    base = coltype % 256
+    if base == 0:
+        return f"CHAR({collength})"
+    if base == 1:
+        return "SMALLINT"
+    if base == 2:
+        return "INTEGER"
+    if base == 3:
+        return "FLOAT"
+    if base == 4:
+        return "SMALLFLOAT"
+    if base == 5:
+        return f"DECIMAL({collength // 256},{collength % 256})"
+    if base == 6:
+        return "SERIAL"
+    if base == 7:
+        return "DATE"
+    if base == 8:
+        return f"MONEY({collength // 256},{collength % 256})"
+    if base == 10:
+        largest, smallest = _informix_dt_qualifier(collength)
+        return f"DATETIME {largest} TO {smallest}"
+    if base == 11:
+        return "BYTE"
+    if base == 12:
+        return "TEXT"
+    if base == 13:
+        return f"VARCHAR({collength})"
+    if base == 14:
+        largest, smallest = _informix_dt_qualifier(collength)
+        return f"INTERVAL {largest} TO {smallest}"
+    if base == 15:
+        return f"NCHAR({collength})"
+    if base == 16:
+        return f"NVARCHAR({collength})"
+    if base == 17:
+        return "INT8"
+    if base == 40:
+        return f"LVARCHAR({collength})"
+    if base == 41:
+        return "BOOLEAN"
+    if base == 52:
+        return "BIGINT"
+    if base == 53:
+        return "BIGSERIAL"
+    raise NotSupportedError(
+        f"get_table_ddl() doesn't know how to render Informix coltype base {base} "
+        f"(raw coltype={coltype}) - likely a collection/row/opaque type"
+    )
+
+
 class _DirectCursor:
     """JDBC cursor that calls Java directly via JPype, bypassing jaydebeapi's global lock."""
 
@@ -446,6 +518,231 @@ class _PooledConn:
 
         schema_cache.set_columns(database, table, columns)
         return columns
+
+    def get_table_ddl(self, table_name, owner=None):
+        """
+        Return a CREATE TABLE statement that reproduces table_name - columns (with
+        type, nullability, default), PRIMARY KEY, FOREIGN KEY, UNIQUE, CHECK
+        constraints and standalone indexes - or None if the table doesn't exist.
+        Works for informix-sqli and mysql. Cached via the schema cache, same as
+        get_table_columns().
+
+        `owner` disambiguates a table name that exists under more than one owner;
+        left as None, the lowest-numbered match wins deterministically
+        (informix-sqli only - mysql table names are already unique per database,
+        so `owner` has no effect there).
+
+        Round-trip tested against a real Informix instance: dropping the original
+        table and re-running the generated DDL recreates it with working
+        constraints (including a real CHECK rejecting a bad INSERT).
+        """
+        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", table_name):
+            raise ValueError(f"Invalid table name: {table_name!r}")
+        if owner is not None and not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", owner):
+            raise ValueError(f"Invalid owner: {owner!r}")
+
+        schema_cache = get_schema_cache()
+        database = self._database or ""
+        cache_name = f"{table_name}@{owner}" if owner else table_name
+        cached = schema_cache.get_table_ddl(database, cache_name)
+        if cached is not None:
+            return cached
+
+        if self._db_type not in ("informix-sqli", "mysql"):
+            raise NotSupportedError(
+                f"get_table_ddl() is not implemented for db_type={self._db_type!r}"
+            )
+
+        if self._db_type == "informix-sqli":
+            ddl = self._informix_table_ddl(table_name, owner)
+        else:
+            ddl = self._mysql_table_ddl(table_name)
+
+        if ddl is not None:
+            schema_cache.set_table_ddl(database, cache_name, ddl)
+        return ddl
+
+    def _mysql_table_ddl(self, table_name):
+        cur = self.cursor()
+        try:
+            cur.execute(f"SHOW CREATE TABLE {table_name}")
+        except DatabaseError:
+            return None
+        row = cur.fetchone()
+        return row[1] if row else None
+
+    def _informix_table_ddl(self, table_name, owner):
+        cur = self.cursor()
+        try:
+            owner_clause = " AND owner = ?" if owner else ""
+            cur.execute(
+                f"SELECT FIRST 1 tabid FROM systables WHERE tabname = ?{owner_clause} "
+                "ORDER BY tabid",
+                (table_name, owner) if owner else (table_name,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            tabid = row[0]
+
+            cur.execute(
+                "SELECT colname, coltype, collength, colno FROM syscolumns "
+                "WHERE tabid = ? ORDER BY colno",
+                (tabid,),
+            )
+            columns = cur.fetchall()
+            colno_to_name = {colno: name.strip() for name, _, _, colno in columns}
+
+            cur.execute("SELECT colno, type, default FROM sysdefaults WHERE tabid = ?", (tabid,))
+            defaults_by_colno = {colno: (dtype, dtext) for colno, dtype, dtext in cur.fetchall()}
+
+            def _default_sql(base_type, collength, colno):
+                entry = defaults_by_colno.get(colno)
+                if entry is None:
+                    return None
+                dtype, dtext = entry
+                if dtype == "T":
+                    return "TODAY"
+                if dtype == "C":
+                    if base_type == 10:
+                        largest, smallest = _informix_dt_qualifier(collength)
+                        return f"CURRENT {largest} TO {smallest}"
+                    return "CURRENT"
+                if dtype == "N":
+                    return "NULL"
+                if dtype == "L":
+                    # "<binary-ish header><single space><literal text>" for numeric
+                    # literals (header may be empty); CHAR/VARCHAR literals instead
+                    # come back with a trailing NUL terminator that str.strip() won't
+                    # touch (it isn't Unicode whitespace) - both confirmed empirically
+                    # against a real instance, see OPTIMIZATION_GUIDE.md.
+                    text = dtext.split(" ", 1)[-1] if " " in dtext else dtext
+                    text = text.rstrip("\x00").strip()
+                    if base_type in _INFORMIX_QUOTED_BASE_TYPES:
+                        return "'" + text.replace("'", "''") + "'"
+                    return text
+                return None  # "S" (serial) / "U" (system, e.g. dbservername) - skip
+
+            col_lines = []
+            for name, coltype, collength, colno in columns:
+                base_type = coltype % 256
+                line = f"    {name.strip()} {_informix_type_sql(coltype, collength)}"
+                if coltype >= 256:
+                    line += " NOT NULL"
+                default_sql = _default_sql(base_type, collength, colno)
+                if default_sql is not None:
+                    line += f" DEFAULT {default_sql}"
+                col_lines.append(line)
+
+            # idxname match happens in Python, not SQL: system-generated index names
+            # come back from sysindexes with a leading space (" 126_37") that the
+            # normal String conversion already strips off of sysconstraints.idxname
+            # by the time it reaches here - a SQL "WHERE idxname = ?" bound with the
+            # already-stripped value would silently match zero rows. Confirmed via
+            # idxname[1,1] on a real instance - see OPTIMIZATION_GUIDE.md.
+            def _table_index_parts(tid):
+                cur.execute(
+                    "SELECT idxname, part1, part2, part3, part4, part5, part6, part7, part8 "
+                    "FROM sysindexes WHERE tabid = ?",
+                    (tid,),
+                )
+                return {name.strip(): parts for name, *parts in cur.fetchall()}
+
+            index_parts_by_name = _table_index_parts(tabid)
+
+            def _index_cols(idxname):
+                parts = index_parts_by_name.get(idxname, [])
+                return [colno_to_name[p] for p in parts if p and p > 0]
+
+            cur.execute(
+                "SELECT constrname, constrtype, idxname, constrid FROM sysconstraints "
+                "WHERE tabid = ?",
+                (tabid,),
+            )
+            constraints = cur.fetchall()
+            constraint_idxnames = {idxname.strip() for _, _, idxname, _ in constraints if idxname}
+
+            # Informix names a table-level constraint with a trailing clause -
+            # "PRIMARY KEY (col) CONSTRAINT name" - not the ANSI "CONSTRAINT name
+            # PRIMARY KEY (col)" order MySQL/PostgreSQL use. Spent a while staring at
+            # a plain "syntax error" with no further explanation before trying the
+            # name at the other end out of sheer desperation. It worked. Of course it
+            # did.
+            constraint_lines = []
+            for cname, ctype, idxname, constrid in constraints:
+                cname = cname.strip()
+                if ctype == "P":
+                    cols = ", ".join(_index_cols(idxname.strip()))
+                    constraint_lines.append(f"    PRIMARY KEY ({cols}) CONSTRAINT {cname}")
+                elif ctype == "U":
+                    cols = ", ".join(_index_cols(idxname.strip()))
+                    constraint_lines.append(f"    UNIQUE ({cols}) CONSTRAINT {cname}")
+                elif ctype == "R":
+                    cols = ", ".join(_index_cols(idxname.strip()))
+                    cur.execute(
+                        "SELECT r.primary, r.ptabid FROM sysreferences r WHERE r.constrid = ?",
+                        (constrid,),
+                    )
+                    prim_constrid, ptabid = cur.fetchone()
+                    cur.execute("SELECT tabname FROM systables WHERE tabid = ?", (ptabid,))
+                    ref_table = cur.fetchone()[0].strip()
+                    cur.execute(
+                        "SELECT idxname FROM sysconstraints WHERE constrid = ?", (prim_constrid,)
+                    )
+                    ref_idxname = cur.fetchone()[0].strip()
+                    cur.execute("SELECT colname, colno FROM syscolumns WHERE tabid = ?", (ptabid,))
+                    ref_colno_to_name = {cn: nm.strip() for nm, cn in cur.fetchall()}
+                    ref_parts = _table_index_parts(ptabid).get(ref_idxname, [])
+                    ref_cols = ", ".join(ref_colno_to_name[p] for p in ref_parts if p and p > 0)
+                    constraint_lines.append(
+                        f"    FOREIGN KEY ({cols}) REFERENCES {ref_table} ({ref_cols}) "
+                        f"CONSTRAINT {cname}"
+                    )
+                elif ctype == "C":
+                    # Same chunk-reassembly caveat as get_procedure_source()'s
+                    # sysprocbody read: bypass cur.execute()/_j2p and read raw off
+                    # the JDBC ResultSet, so a long CHECK expression split across
+                    # multiple syschecks rows can't have whitespace eaten at a chunk
+                    # boundary and weld two tokens together.
+                    pstmt = self._jc.prepareStatement(
+                        "SELECT checktext FROM syschecks WHERE constrid = ? AND type = 'T' "
+                        "ORDER BY seqno"
+                    )
+                    try:
+                        pstmt.setInt(1, constrid)
+                        rs = pstmt.executeQuery()
+                        chunks = []
+                        try:
+                            while rs.next():
+                                chunk = rs.getString(1)
+                                if chunk:
+                                    chunks.append(str(chunk))
+                        finally:
+                            rs.close()
+                    finally:
+                        pstmt.close()
+                    check_text = "".join(chunks).rstrip()
+                    constraint_lines.append(f"    CHECK {check_text} CONSTRAINT {cname}")
+                # ctype == "N" (NOT NULL) is already reflected in the column
+                # definition via the coltype >= 256 offset - skip, it'd be redundant.
+
+            extra_index_lines = []
+            for idxname, parts in index_parts_by_name.items():
+                if idxname in constraint_idxnames:
+                    continue
+                cols = ", ".join(colno_to_name[p] for p in parts if p and p > 0)
+                extra_index_lines.append(f"CREATE INDEX {idxname} ON {table_name}({cols});")
+        except Exception as e:
+            if is_java_exception(e):
+                e = translate_jdbc_exception(e)
+            if isinstance(e, DatabaseError):
+                return None
+            raise
+
+        ddl = f"CREATE TABLE {table_name} (\n" + ",\n".join(col_lines + constraint_lines) + "\n);"
+        if extra_index_lines:
+            ddl += "\n" + "\n".join(extra_index_lines)
+        return ddl
 
     def get_procedure_source(self, proc_name, owner=None, numargs=None):
         """

@@ -846,6 +846,191 @@ class TestGetTableColumns:
         assert conn.get_table_columns("orders") == []
 
 
+class TestInformixTypeSql:
+    """Pure-function tests for the coltype/collength decoding - no DB needed, but
+    every case here was cross-checked against a real Informix instance first (see
+    OPTIMIZATION_GUIDE.md) since the encoding isn't reliably documented."""
+
+    def test_common_base_types(self):
+        from wbjdbc import _informix_type_sql
+
+        assert _informix_type_sql(0, 10) == "CHAR(10)"
+        assert _informix_type_sql(1, 2) == "SMALLINT"
+        assert _informix_type_sql(2, 4) == "INTEGER"
+        assert _informix_type_sql(6, 4) == "SERIAL"
+        assert _informix_type_sql(13, 50) == "VARCHAR(50)"
+        assert _informix_type_sql(17, 10) == "INT8"
+        assert _informix_type_sql(41, 1) == "BOOLEAN"
+        assert _informix_type_sql(52, 8) == "BIGINT"
+        assert _informix_type_sql(309, 8) == "BIGSERIAL"  # 309 = 256 (NOT NULL) + 53
+
+    def test_decimal_and_money_decode_precision_and_scale(self):
+        from wbjdbc import _informix_type_sql
+
+        assert _informix_type_sql(5, 2051) == "DECIMAL(8,3)"  # 2051 = 8*256+3
+        assert _informix_type_sql(8, 2562) == "MONEY(10,2)"  # 2562 = 10*256+2
+
+    def test_datetime_and_interval_qualifiers(self):
+        from wbjdbc import _informix_type_sql
+
+        assert _informix_type_sql(10, 3594) == "DATETIME YEAR TO SECOND"
+        assert _informix_type_sql(10, 2052) == "DATETIME YEAR TO DAY"
+        assert _informix_type_sql(10, 1642) == "DATETIME HOUR TO SECOND"
+        assert _informix_type_sql(10, 4365) == "DATETIME YEAR TO FRACTION(3)"
+        assert _informix_type_sql(14, 1538) == "INTERVAL YEAR TO MONTH"
+        assert _informix_type_sql(14, 2122) == "INTERVAL DAY TO SECOND"
+
+    def test_unsupported_base_type_raises_not_supported_error(self):
+        from wbjdbc import _informix_type_sql
+        from wbjdbc.exceptions import NotSupportedError
+
+        with pytest.raises(NotSupportedError):
+            _informix_type_sql(21, 0)  # LIST - collection type, not implemented
+
+
+class TestGetTableDdl:
+    def _rs_for_rows(self, rows):
+        rs = MagicMock()
+        meta = MagicMock()
+        ncols = len(rows[0]) if rows else 1
+        meta.getColumnCount.return_value = ncols
+        meta.getColumnLabel.side_effect = lambda i: f"col{i}"
+        meta.getColumnType.return_value = 12
+        rs.getMetaData.return_value = meta
+        row_iter = iter(rows)
+        current = [None]
+
+        def _next():
+            try:
+                current[0] = next(row_iter)
+                return True
+            except StopIteration:
+                return False
+
+        rs.next.side_effect = _next
+        rs.getObject.side_effect = lambda i: current[0][i - 1]
+        rs.getString.side_effect = lambda i: current[0][i - 1]
+        rs.getInt.side_effect = lambda i: current[0][i - 1]
+        return rs
+
+    def _pstmt_sequence(self, *row_sets):
+        """One MagicMock prepareStatement result per row_set, in call order."""
+        pstmts = []
+        for rows in row_sets:
+            pstmt = MagicMock()
+            pstmt.executeQuery.return_value = self._rs_for_rows(rows)
+            pstmts.append(pstmt)
+        return pstmts
+
+    def _pool_conn(self, db_type):
+        pool = _build_pool(pool_size=1)
+        conn = pool.acquire()
+        conn._db_type = db_type
+        conn._database = "testdb"
+        return conn
+
+    def test_mysql_returns_show_create_table(self):
+        from wbjdbc.cache import reset_cache
+
+        reset_cache()
+        conn = self._pool_conn("mysql")
+        row = ("t", "CREATE TABLE `t` (`id` int NOT NULL) ENGINE=InnoDB")
+        rs = self._rs_for_rows([row])
+        pstmt = MagicMock()
+        pstmt.executeQuery.return_value = rs
+        conn._jc.prepareStatement.return_value = pstmt
+
+        ddl = conn.get_table_ddl("t")
+
+        assert ddl == "CREATE TABLE `t` (`id` int NOT NULL) ENGINE=InnoDB"
+        conn._jc.prepareStatement.assert_called_once_with("SHOW CREATE TABLE t")
+
+    def test_mysql_not_found_returns_none(self):
+        # Simulates what actually reaches _mysql_table_ddl's except clause: by the
+        # time an error gets here, _DirectCursor.execute() has already translated
+        # the underlying Java exception into a DatabaseError subclass.
+        from wbjdbc.cache import reset_cache
+        from wbjdbc.exceptions import ProgrammingError
+
+        reset_cache()
+        conn = self._pool_conn("mysql")
+        pstmt = MagicMock()
+        pstmt.executeQuery.side_effect = ProgrammingError("Table 'testdb.does_not_exist' doesn't exist")
+        conn._jc.prepareStatement.return_value = pstmt
+
+        assert conn.get_table_ddl("does_not_exist") is None
+
+    def test_informix_simple_table_pk_only(self):
+        # The simplest path: no FK/CHECK/extra index, so exactly 5 queries run in
+        # order - resolve tabid, columns, defaults, index parts, constraints.
+        from wbjdbc.cache import reset_cache
+
+        reset_cache()
+        conn = self._pool_conn("informix-sqli")
+        pstmts = self._pstmt_sequence(
+            [(144,)],  # tabid
+            [("id", 262, 4, 1), ("name", 269, 20, 2)],  # columns: id SERIAL NOT NULL, name VARCHAR(20) NOT NULL
+            [],  # no defaults
+            [(" 144_1", 1, 0, 0, 0, 0, 0, 0, 0)],  # sysindexes: PK on colno 1
+            [("u144_1", "P", " 144_1", 1)],  # sysconstraints: PK constraint
+        )
+        conn._jc.prepareStatement.side_effect = pstmts
+
+        ddl = conn.get_table_ddl("t")
+
+        assert ddl == (
+            "CREATE TABLE t (\n"
+            "    id SERIAL NOT NULL,\n"
+            "    name VARCHAR(20) NOT NULL,\n"
+            "    PRIMARY KEY (id) CONSTRAINT u144_1\n"
+            ");"
+        )
+
+    def test_informix_not_found_returns_none(self):
+        from wbjdbc.cache import reset_cache
+
+        reset_cache()
+        conn = self._pool_conn("informix-sqli")
+        pstmt = MagicMock()
+        pstmt.executeQuery.return_value = self._rs_for_rows([])
+        conn._jc.prepareStatement.return_value = pstmt
+
+        assert conn.get_table_ddl("does_not_exist") is None
+
+    def test_unsupported_db_type_raises_not_supported_error(self):
+        from wbjdbc.exceptions import NotSupportedError
+
+        conn = self._pool_conn("oracle")
+        with pytest.raises(NotSupportedError):
+            conn.get_table_ddl("t")
+
+    def test_invalid_table_name_raises_value_error(self):
+        conn = self._pool_conn("mysql")
+        with pytest.raises(ValueError):
+            conn.get_table_ddl("t; drop table x; --")
+
+    def test_invalid_owner_raises_value_error(self):
+        conn = self._pool_conn("informix-sqli")
+        with pytest.raises(ValueError):
+            conn.get_table_ddl("t", owner="o; drop table x; --")
+
+    def test_result_is_cached(self):
+        from wbjdbc.cache import reset_cache
+
+        reset_cache()
+        conn = self._pool_conn("mysql")
+        row = ("t", "CREATE TABLE t (id int)")
+        pstmt = MagicMock()
+        pstmt.executeQuery.return_value = self._rs_for_rows([row])
+        conn._jc.prepareStatement.return_value = pstmt
+
+        first = conn.get_table_ddl("t")
+        second = conn.get_table_ddl("t")
+
+        assert first == second
+        assert conn._jc.prepareStatement.call_count == 1
+
+
 class TestExecuteBatchChunking:
     def test_no_batch_size_is_single_executemany_no_commit(self):
         pool = _build_pool(pool_size=1)

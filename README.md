@@ -16,6 +16,7 @@ Totalmente compatível com versões anteriores (v1.x) e pronta para produção.
 - 🧩 **Mapeamento Automático de Tipos** — Conversão bidirecional entre JDBC e Python.  
 - 🧮 **Métricas e Logging Estruturado** — Estatísticas detalhadas de desempenho.  
 - 🔧 **Stored Procedures** — `callproc()` (IN/OUT/INOUT), `get_procedure_source()` pra recuperar o DDL de uma procedure/function existente, e `list_procedures()` pra listar todas de uma vez (Informix, MySQL, PostgreSQL).  
+- 🗂️ **Table DDL** — `get_table_ddl()` recupera o `CREATE TABLE` completo (colunas, PK, FK, UNIQUE, CHECK, índices) de uma tabela existente (Informix, MySQL).  
 - ⚙️ **Configuração via `.env` ou Variáveis de Ambiente**  
 - ✅ **Compatível 100% com versões anteriores**
 
@@ -222,7 +223,8 @@ Fully production-ready and **100% backward compatible** with v1.x.
 - 🧠 **Metadata Caching** — Up to 99% fewer repeated schema queries  
 - 🧩 **Type Mapping** — Automatic JDBC ↔ Python conversions  
 - 🧮 **Metrics & Structured Logging**  
-- 🔧 **Stored Procedures** — `callproc()` (IN/OUT/INOUT), `get_procedure_source()` to retrieve the DDL of an existing procedure/function, and `list_procedures()` to list them all (Informix, MySQL, PostgreSQL).  
+- 🔧 **Stored Procedures** — `callproc()` (IN/OUT/INOUT), `get_procedure_source()` to retrieve the DDL of an existing procedure/function, and `list_procedures()` to list them all (Informix, MySQL, PostgreSQL).
+- 🗂️ **Table DDL** — `get_table_ddl()` retrieves the full `CREATE TABLE` (columns, PK, FK, UNIQUE, CHECK, indexes) for an existing table (Informix, MySQL).  
 - ⚙️ **Environment-based Configuration (.env)**  
 - ✅ **100% Backward Compatible**
 
